@@ -4,6 +4,7 @@
   "version": "0.2.0",
   "description": "A ranked queue, track history and durable playback for NTS Radio's archive.",
   "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsqItfzikvnBH5AOXtbm81VH61xEUUhobzRGckEOZhPXsE6vUS8OjTgj5+KslrGpueQBu7Al4Pv9i/o4ecde4FCBa6cwe2Ydrbbt91wbwdsd9X/i9x44gdl19qthu7xw8s/M74zKdndcdVJtd1Xx/vaebghxaeSU/QhPhNk3fE4NqItJgEvlpHKAdVBhCxmtmbSz9WOYjrsQTqCai8FBV6TWWVvkazUBRPYLMuCs4BM1ijxZfrrjjSTLqqIsreRwKBhW/okPMATp4ck7fP9yAhbIvRkYE4Gg3yUChtgHPZhi+TcfCugz25AMe6d2Ucq0dhMjuVNgWPkpYmbDZR/b2UQIDAQAB",
   "permissions": ["storage", "alarms", "sidePanel", "contextMenus", "scripting"],
   "host_permissions": ["https://www.nts.live/*"],
   "background": { "service_worker": "background.js", "type": "module" },
