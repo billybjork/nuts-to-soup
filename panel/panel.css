@@ -1,0 +1,535 @@
+/* NTS's own type, served CORS-open from nts.live (not bundled). */
+@font-face {
+  font-family: 'Univers-Condensed';
+  src: url('https://www.nts.live/css/fonts/Univers-Condensed/UniversCom-57Condensed.woff2') format('woff2');
+  font-weight: 400;
+}
+@font-face {
+  font-family: 'Univers-Condensed';
+  src: url('https://www.nts.live/css/fonts/UniversLTPro-BoldCond.woff2') format('woff2');
+  font-weight: 700;
+}
+
+:root {
+  --bg: #000;
+  --fg: #fff;
+  --dim: #999;
+  --line: #333;
+  --font: 'Univers-Condensed', 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overscroll-behavior: none;
+}
+
+/* The header stays put and only the list below it scrolls, so the scrollbar
+   starts under the now-playing bar instead of running behind it. */
+body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 400 14px/1.3 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: none;
+  scrollbar-width: thin;
+  scrollbar-color: #555 transparent;
+}
+
+body.sorting {
+  user-select: none;
+  cursor: grabbing;
+}
+
+/* --- header ------------------------------------------------------------- */
+
+.top {
+  flex: none;
+  background: var(--bg);
+  border-bottom: 1px solid var(--fg);
+}
+
+.brand {
+  padding: 10px 12px 0;
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: 0.01em;
+}
+
+.tabs {
+  display: flex;
+  gap: 18px;
+  padding: 0 12px;
+}
+
+.tabs button {
+  padding: 10px 0 8px;
+  font-weight: 700;
+  font-size: 12px;
+  text-transform: uppercase;
+  color: var(--dim);
+  border-bottom: 3px solid transparent;
+}
+
+.tabs button.on {
+  color: var(--fg);
+  border-bottom-color: var(--fg);
+}
+
+.count {
+  font-weight: 400;
+}
+
+/* --- now playing ----------------------------------------------------------- */
+
+.now {
+  display: grid;
+  grid-template-columns: 56px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.now img {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  display: block;
+}
+
+.now .title {
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 16px;
+  text-transform: uppercase;
+}
+
+.now .meta {
+  font-size: 11px;
+  margin-top: 2px;
+  color: #444;
+}
+
+.now .bar {
+  grid-column: 1 / -1;
+  height: 3px;
+  background: #ccc;
+}
+
+.now .bar i {
+  display: block;
+  height: 100%;
+  background: var(--bg);
+}
+
+.controls {
+  display: flex;
+  gap: 6px;
+}
+
+.controls button {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--bg);
+  border-radius: 50%;
+}
+
+.controls button:hover {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* --- rows ------------------------------------------------------------------ */
+
+.row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 14px 64px 1fr 28px;
+  gap: 8px;
+  padding: 10px 12px 10px 4px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  outline: none;
+}
+
+/* Only shown once you start using the keyboard. */
+body.keys .row.focus {
+  box-shadow: inset 3px 0 0 var(--fg);
+}
+
+.grip {
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  color: #444;
+  cursor: grab;
+  touch-action: none;
+}
+
+.grip svg {
+  width: 10px;
+  height: 14px;
+}
+
+.row:hover .grip,
+.grip:focus-visible {
+  color: var(--fg);
+}
+
+.sorting .row {
+  transition: transform 0.15s ease;
+}
+
+.row.dragging {
+  z-index: 3;
+  transition: none;
+  background: #111;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.8), 0 0 0 1px var(--fg);
+  cursor: grabbing;
+}
+
+/* --- tracks --------------------------------------------------------------- */
+
+.track {
+  display: grid;
+  grid-template-columns: 40px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+
+.track:hover {
+  background: #111;
+}
+
+.track img {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  display: block;
+  background: #111;
+}
+
+.track .name {
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 16px;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.track .meta {
+  margin-top: 2px;
+}
+
+.track time {
+  font-size: 11px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.track.live {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.track.live .meta,
+.track.live time {
+  color: #444;
+}
+
+.thumb {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  background: #111;
+}
+
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.thumb .bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.thumb .bar i {
+  display: block;
+  height: 100%;
+  background: var(--fg);
+}
+
+.body {
+  min-width: 0;
+}
+
+.title {
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 17px;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.title:hover {
+  text-decoration: underline;
+}
+
+.meta {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--dim);
+  text-transform: uppercase;
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.tag {
+  padding: 2px 5px 1px;
+  border: 1px solid var(--fg);
+  font-weight: 700;
+  font-size: 10px;
+  line-height: 12px;
+  text-transform: uppercase;
+}
+
+.tag.solid {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.why {
+  margin-top: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #555;
+  transition: color 0.1s linear;
+}
+
+.row:hover .actions,
+.row.focus .actions {
+  color: var(--fg);
+}
+
+.actions button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  border: 1px solid currentColor;
+}
+
+.actions button:hover,
+.actions button.on {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.empty {
+  padding: 40px 12px;
+  color: var(--dim);
+  text-transform: uppercase;
+  font-weight: 700;
+  font-size: 12px;
+  text-align: center;
+}
+
+/* --- hosts ----------------------------------------------------------------- */
+
+.section {
+  padding: 14px 12px 6px;
+  font-weight: 700;
+  font-size: 12px;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--fg);
+}
+
+.host {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.host span {
+  color: var(--dim);
+  font-weight: 400;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.host a:hover {
+  text-decoration: underline;
+}
+
+.genres {
+  padding: 10px 12px;
+}
+
+.setting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+/* --- footer ------------------------------------------------------------------- */
+
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 12px;
+  font-size: 11px;
+  color: var(--dim);
+  text-transform: uppercase;
+}
+
+.foot button,
+.pill {
+  padding: 5px 10px 4px;
+  border: 1px solid var(--fg);
+  border-radius: 999px;
+  color: var(--fg);
+  font-weight: 700;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.foot button:hover,
+.pill:hover {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.foot .error {
+  color: var(--fg);
+}
+
+.add {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+}
+
+.add input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 10px 4px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  outline: none;
+}
+
+.add input:focus {
+  border-color: var(--fg);
+}
+
+.keys {
+  width: 100%;
+}
+
+.toast {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  padding: 10px 12px;
+  background: var(--fg);
+  color: var(--bg);
+  font-weight: 700;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+/* --- drop target ------------------------------------------------------------- */
+
+body.dropping::after {
+  content: 'Drop to add to queue';
+  position: fixed;
+  inset: 8px;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--fg);
+  background: rgba(0, 0, 0, 0.85);
+  font-weight: 700;
+  font-size: 16px;
+  text-transform: uppercase;
+  pointer-events: none;
+}

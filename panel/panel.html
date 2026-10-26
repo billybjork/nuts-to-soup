@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nuts to Soup</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">NUTS TO SOUP</div>
+      <nav class="tabs">
+        <button data-view="queue">Queue <span class="count" id="count-queue"></span></button>
+        <button data-view="tracks">Tracks</button>
+        <button data-view="hosts">Hosts</button>
+      </nav>
+      <section id="now" class="now" hidden></section>
+    </header>
+    <div id="scroll" class="scroll">
+      <main id="list"></main>
+      <footer id="foot" class="foot"></footer>
+    </div>
+    <div id="toast" class="toast" hidden></div>
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>

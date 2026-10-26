@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Nuts to Soup",
+  "version": "0.2.0",
+  "description": "A ranked queue, track history and durable playback for NTS Radio's archive.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "alarms", "sidePanel", "contextMenus", "scripting"],
+  "host_permissions": ["https://www.nts.live/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "side_panel": { "default_path": "panel/panel.html" },
+  "action": { "default_title": "Nuts to Soup" },
+  "content_scripts": [
+    {
+      "matches": ["https://www.nts.live/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  }
+}
