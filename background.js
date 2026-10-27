@@ -6,9 +6,10 @@ import {
   fetchTracks,
   fetchShow,
   parsePath,
+  trackAt,
 } from './lib/nts.js';
-import { load, save } from './lib/store.js';
-import { buildProfile, orderQueue } from './lib/rank.js';
+import { load, save, isDone } from './lib/store.js';
+import { buildProfile, orderQueue, stackKey } from './lib/rank.js';
 
 const POLL_MINUTES = 30;
 const SYNC_MINUTES = 24 * 60;
@@ -85,9 +86,21 @@ function mutate(fn) {
   });
 }
 
-
 const without = (list, alias) => list.filter((x) => x.alias !== alias);
 const has = (list, alias) => list.some((x) => x.alias === alias);
+
+// A manual position above everything else in the queue.
+const topRank = (queue) => Math.min(1, ...queue.filter((x) => x.rank != null).map((x) => x.rank)) - 1;
+
+// Gives an episode a manual position. Its show's stack moves with it, so the
+// show's other episodes lose theirs.
+function place(s, alias, rank) {
+  const key = s.eps[alias] && stackKey(s.eps[alias]);
+  for (const x of s.queue) {
+    if (x.alias === alias) x.rank = rank;
+    else if (key && s.eps[x.alias] && stackKey(s.eps[x.alias]) === key) delete x.rank;
+  }
+}
 
 // Drop cached metadata nothing refers to any more.
 function prune(s) {
@@ -301,10 +314,11 @@ async function livePlayerTab() {
   return tab && !tab.discarded ? tab : null;
 }
 
-async function markPlaying(alias, playing) {
+// `pos`: where it is now, after a seek, until the tab next reports in.
+async function markPlaying(alias, playing, pos) {
   await mutate((t) => {
     if (t.now?.alias !== alias) return [];
-    t.now = { ...t.now, playing, at: Date.now() };
+    t.now = { ...t.now, playing, at: Date.now(), ...(pos != null && { pos }) };
     return ['now'];
   });
 }
@@ -318,7 +332,7 @@ function serial(fn) {
   return run;
 }
 
-// `front`: the mix being left goes to the top of the queue. `at`: start there
+// `front`: the episode being left goes to the top of the queue. `at`: start there
 // (seconds) instead of where you left off.
 async function play(alias, { front, at, path } = {}) {
   const s = await load();
@@ -330,10 +344,7 @@ async function play(alias, { front, at, path } = {}) {
   // Update the panel straight away; loading can take a few seconds.
   await mutate((t) => {
     t.eps[alias] ??= ep;
-    if (front && prev && prev !== alias) {
-      const q = t.queue.find((x) => x.alias === prev);
-      if (q) q.rank = Math.min(1, ...t.queue.filter((x) => x !== q && x.rank != null).map((x) => x.rank)) - 1;
-    }
+    if (front && prev && prev !== alias && has(t.queue, prev)) place(t, prev, topRank(t.queue));
     const q = t.queue.find((x) => x.alias === alias);
     if (q) delete q.rank;
     else if (!t.done[alias]) t.queue.push({ alias, addedAt: Date.now() });
@@ -357,22 +368,39 @@ async function play(alias, { front, at, path } = {}) {
 
 async function next() {
   const s = await load();
-  const rest = { ...s, queue: s.queue.filter((q) => q.alias !== s.now?.alias) };
-  const [first] = orderQueue(rest, buildProfile(s));
+  const [first] = orderQueue(s, buildProfile(s));
   if (!first) return { empty: true };
   return play(first.alias);
 }
 
+// Moves on from the episode playing, which leaves the queue. Skipping one in
+// its first few minutes counts against it, like removing it.
+async function skip() {
+  const s = await load();
+  const alias = s.now?.alias;
+  if (!orderQueue(s, buildProfile(s)).length) return { empty: true };
+  if (alias) {
+    await mutate((t) => {
+      const p = t.progress[alias];
+      t.queue = without(t.queue, alias);
+      if (isDone(p)) t.done[alias] = Date.now();
+      else if ((p?.pos || 0) < 300) t.dismissed[alias] = Date.now();
+      return ['queue', 'done', 'dismissed'];
+    });
+  }
+  return next();
+}
+
 // Asks the player tab to play (msg.type 'resume') or seek in (msg.type
-// 'seek') the mix it already has loaded, which NTS restores after a reload. Null when it doesn't have it, or
-// there's no tab to ask, and the mix needs loading.
+// 'seek') the episode it already has loaded, which NTS restores after a reload. Null when it doesn't have it, or
+// there's no tab to ask, and the episode needs loading.
 async function inPlayerTab(msg) {
   const tab = await livePlayerTab();
   if (!tab) return null;
   const r = await sendToTab(tab.id, msg, 6).catch(() => null);
   if (r?.state === 'playing') {
     await chrome.storage.session.set({ playerTab: tab.id });
-    await markPlaying(msg.alias, true);
+    await markPlaying(msg.alias, true, msg.t);
     return { started: true };
   }
   if (r?.state === 'blocked') {
@@ -385,7 +413,7 @@ async function inPlayerTab(msg) {
 
 // Play/pause from the panel. `want` is what its button showed, so a stale
 // playing flag can't turn a press of play into a pause. Playing picks up in
-// the tab if the mix is still loaded there, and otherwise loads it again
+// the tab if the episode is still loaded there, and otherwise loads it again
 // where you left off (tab closed, reloaded, discarded, Chrome restarted).
 async function toggle(want) {
   const { now } = await load();
@@ -397,7 +425,7 @@ async function toggle(want) {
   return null;
 }
 
-// Jump to the start of a track: in place if its mix is the one playing.
+// Jump to the start of a track: in place if its episode is the one playing.
 async function jump({ alias, path, offset }) {
   if ((await load()).now?.alias === alias) {
     const r = await inPlayerTab({ type: 'seek', alias, t: offset });
@@ -407,11 +435,6 @@ async function jump({ alias, path, offset }) {
 }
 
 // Remember each track as it starts playing, for the Tracks tab.
-const trackAt = (tracks, pos) => {
-  const t = tracks.findLast((x) => x.offset <= pos);
-  return t && pos < t.offset + (t.duration || Infinity) ? t : null;
-};
-
 async function logTrack(n) {
   if (!n?.playing || !n.alias) return;
   await mutate((s) => {
@@ -487,7 +510,7 @@ async function add(urls) {
 const handlers = {
   play: (m) => serial(() => play(m.alias, { front: true })),
   jump: (m) => serial(() => jump(m)),
-  next: () => serial(next),
+  skip: () => serial(skip),
   toggle: (m) => serial(() => toggle(m.play)),
   ended: (m) => onEnded(m.alias),
   nowPlaying: (m, sender) => onNowPlaying(m, sender),
@@ -497,23 +520,36 @@ const handlers = {
   sync: () => sync(),
   add: (m) => add(m.urls),
 
-  // `aliases` is the queue as displayed and `moved` is where the dragged mix
-  // landed. Everything down to that point (and to any earlier manual
-  // placement) is fixed in the order shown; the rest stays ranked.
+  // `aliases` is the queue as displayed (one front episode per card), and a
+  // card moved there from `from` to `moved`. Everything down to the lower of
+  // the two (and to any earlier manual placement) is fixed in the order
+  // shown. The rest stays ranked, following on from what it did before, so
+  // it keeps the order you saw.
   reorder: (m) =>
     mutate((s) => {
+      const shown = orderQueue(s, buildProfile(s));
       const q = new Map(s.queue.map((x) => [x.alias, x]));
-      let last = m.moved;
+      let last = Math.max(m.moved, m.from ?? m.moved);
       m.aliases.forEach((a, i) => q.get(a)?.rank != null && (last = Math.max(last, i)));
-      m.aliases.slice(0, last + 1).forEach((a, i) => q.has(a) && (q.get(a).rank = i));
+      m.aliases.slice(0, last + 1).forEach((a, i) => place(s, a, i));
+      s.chainFrom = shown[last + 1]?.after ?? null;
+      return ['queue', 'chainFrom'];
+    }),
+
+  // Play next: to the top of the queue, stack and all.
+  top: (m) =>
+    mutate((s) => {
+      if (has(s.queue, m.alias)) place(s, m.alias, topRank(s.queue));
       return ['queue'];
     }),
 
   // Taking something out of the queue counts against it, like a dismissal.
   remove: (m) =>
     mutate((s) => {
-      s.queue = without(s.queue, m.alias);
-      s.dismissed[m.alias] = Date.now();
+      for (const alias of m.aliases) {
+        s.queue = without(s.queue, alias);
+        s.dismissed[alias] = Date.now();
+      }
       return ['queue', 'dismissed'];
     }),
 

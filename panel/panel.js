@@ -1,21 +1,25 @@
 import { load, isDone } from '../lib/store.js';
-import { NTS } from '../lib/nts.js';
+import { NTS, trackAt } from '../lib/nts.js';
 import { buildProfile, orderQueue, topGenres } from '../lib/rank.js';
 
 const ICONS = {
   play: '<svg viewBox="0 0 16 16"><path d="M4 2l10 6-10 6z"/></svg>',
   pause: '<svg viewBox="0 0 16 16"><path d="M3 2h4v12H3zM9 2h4v12H9z"/></svg>',
-  next: '<svg viewBox="0 0 16 16"><path d="M2 2l8 6-8 6zM11 2h3v12h-3z"/></svg>',
-  add: '<svg viewBox="0 0 16 16"><path d="M7 2h2v5h5v2H9v5H7V9H2V7h5z"/></svg>',
-  remove: '<svg viewBox="0 0 16 16"><path d="M3.4 2L8 6.6 12.6 2 14 3.4 9.4 8l4.6 4.6-1.4 1.4L8 9.4 3.4 14 2 12.6 6.6 8 2 3.4z"/></svg>',
-  grip: '<svg viewBox="0 0 10 14"><path d="M1 1h3v3H1zM6 1h3v3H6zM1 5.5h3v3H1zM6 5.5h3v3H6zM1 10h3v3H1zM6 10h3v3H6z"/></svg>',
+  skip: '<svg viewBox="0 0 16 16"><path d="M2 2l8 6-8 6zM11 2h3v12h-3z"/></svg>',
+  track: '<svg viewBox="0 0 16 16"><path d="M1 3l6.5 5L1 13zM8 3l6.5 5L8 13z"/></svg>',
+  more: '<svg viewBox="0 0 16 16"><path d="M1.5 6.5h3v3h-3zM6.5 6.5h3v3h-3zM11.5 6.5h3v3h-3z"/></svg>',
+  grip: '<svg viewBox="0 0 6 10"><path d="M0 0h2v2H0zM4 0h2v2H4zM0 4h2v2H0zM4 4h2v2H4zM0 8h2v2H0zM4 8h2v2H4z"/></svg>',
 };
 
 let state = null;
 let view = 'queue';
+let shown = null; // the view last rendered; switching views doesn't animate
 let focus = 0; // keyboard focus index in the current list
-let rows = []; // aliases in the current list, in display order
+let rows = []; // front aliases of the cards in the current list, in display order
+let cards = new Map(); // stack key -> card, as last rendered
 let sorting = false; // a drag is in progress; hold off re-rendering
+let seek = null; // {alias, pos, at}: a jump the NTS tab hasn't reported back yet
+const open = new Set(); // stack keys shown expanded
 
 try {
   view = localStorage.getItem('view') || 'queue';
@@ -69,7 +73,85 @@ const isPlaying = (n) => !!n?.playing && Date.now() - n.at < 60000;
 function livePosition() {
   const n = state.now;
   if (!n?.alias) return 0;
-  return (n.pos || 0) + (isPlaying(n) ? (Date.now() - n.at) / 1000 : 0);
+  const from = seek?.alias === n.alias && seek.at > n.at ? seek : n;
+  return (from.pos || 0) + (isPlaying(n) ? (Date.now() - from.at) / 1000 : 0);
+}
+
+const trackName = (t) => [t.artist, t.title].filter(Boolean).join(' — ');
+
+// The first listed track starting after `pos`, give or take a moment for
+// tracks just jumped to.
+const trackAfter = (ep, pos) => ep?.tracks?.find((t) => t.offset > pos + 2);
+
+// --- animation -------------------------------------------------------------------
+
+const still = matchMedia('(prefers-reduced-motion: reduce)');
+const EASE = 'cubic-bezier(0.2, 0.8, 0.2, 1)';
+
+// Runs `update`, then slides each card (and the now-playing card) from where
+// it was to where it ended up. One whose key is new starts from wherever its
+// episode was shown before, so a queue row rises into the now-playing card and
+// back; failing that it fades in.
+function flip(update, animate = true) {
+  if (!animate || still.matches) return update();
+  const byKey = new Map();
+  const byEp = new Map();
+  for (const el of document.querySelectorAll('[data-key], [data-ep]')) {
+    const r = el.getBoundingClientRect();
+    if (el.dataset.key) byKey.set(el.dataset.key, r);
+    if (el.dataset.ep && !byEp.has(el.dataset.ep)) byEp.set(el.dataset.ep, r);
+  }
+  update();
+  for (const el of document.querySelectorAll('#now[data-key], #list > [data-key]')) {
+    if (el.hidden) continue;
+    el.getAnimations().forEach((a) => a.cancel());
+    const from = byKey.get(el.dataset.key) || byEp.get(el.dataset.ep);
+    const to = el.getBoundingClientRect();
+    if (!from) {
+      el.animate([{ opacity: 0, transform: 'translateY(-6px)' }, { opacity: 1, transform: 'none' }], {
+        duration: 220,
+        easing: 'ease-out',
+      });
+      continue;
+    }
+    const dx = from.left - to.left;
+    const dy = from.top - to.top;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
+    const offscreen = (r) => r.bottom < 0 || r.top > innerHeight;
+    if (offscreen(from) && offscreen(to)) continue;
+    el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], { duration: 280, easing: EASE });
+  }
+}
+
+// Slides an episode out before the action that removes it; the gap it leaves
+// closes once the list re-renders. `back` undoes it if the action fails.
+function leave(el, dx = 40) {
+  if (!el || still.matches) return Promise.resolve();
+  return el
+    .animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: `translateX(${dx}px)` }], {
+      duration: 160,
+      easing: 'ease-in',
+      fill: 'forwards',
+    })
+    .finished.catch(() => {});
+}
+const back = (el) => el?.getAnimations().forEach((a) => a.cancel());
+
+// Swaps in new cards, keeping any whose markup hasn't changed, so their images
+// don't reload and a hover isn't lost.
+function patch(list, items) {
+  const old = new Map([...list.children].filter((el) => el.dataset.key).map((el) => [el.dataset.key, el]));
+  const tpl = document.createElement('template');
+  list.replaceChildren(
+    ...items.map(({ key, html }) => {
+      const el = old.get(key);
+      if (el?._html === html) return el;
+      tpl.innerHTML = html;
+      const fresh = tpl.content.firstElementChild;
+      fresh._html = html;
+      return fresh;
+    }),
+  );
 }
 
 // --- rendering ------------------------------------------------------------------
@@ -78,62 +160,118 @@ function renderNow() {
   const el = $('#now');
   const n = state.now;
   const ep = n?.alias && state.eps[n.alias];
-  const playing = isPlaying(n);
   if (!ep) {
     el.hidden = true;
+    delete el.dataset.key;
+    delete el.dataset.ep;
     return;
   }
+  const playing = isPlaying(n);
+  // Time, progress and the current track are filled in by tickNow().
+  const html = `
+    <div class="eq${playing ? ' on' : ''}"><i></i><i></i><i></i></div>
+    <img src="${esc(ep.image || ep.thumb)}" alt="" />
+    <div class="body">
+      <a class="title" href="${NTS}${esc(ep.path)}" target="_blank">${esc(ep.name || ep.alias)}</a>
+      <div class="meta">${playing ? 'Playing' : 'Paused'} · <span data-live="time"></span></div>
+      ${
+        ep.tracks?.length
+          ? `<div class="now-track">
+              <span data-live="track"></span>
+              <button data-act="nextTrack" data-live="next" title="Next track (shift + n)">${ICONS.track}</button>
+            </div>`
+          : ''
+      }
+    </div>
+    <div class="actions">
+      <button data-act="toggle" title="Play / pause (space)">${playing ? ICONS.pause : ICONS.play}</button>
+      <button data-act="skip" title="Skip to the next episode (n)">${ICONS.skip}</button>
+    </div>
+    <div class="bar"><i data-live="bar"></i></div>`;
   el.hidden = false;
+  el.dataset.key = `now:${n.alias}`;
+  el.dataset.ep = n.alias;
+  if (el._html !== html) {
+    el.innerHTML = html;
+    el._html = html;
+  }
+  tickNow();
+}
+
+function tickNow() {
+  const n = state?.now;
+  const ep = n?.alias && state.eps[n.alias];
+  if (!ep) return;
   const dur = state.progress[n.alias]?.dur || n.dur || 0;
   const pos = livePosition();
-  el.innerHTML = `
-    <img src="${esc(ep.image || ep.thumb)}" alt="" />
-    <div>
-      <a class="title" href="${NTS}${esc(ep.path)}" target="_blank">${esc(ep.name || ep.alias)}</a>
-      <div class="meta">${playing ? 'Playing' : 'Paused'} · <span id="now-time">${fmtTime(pos)}${dur ? ` / ${fmtTime(dur)}` : ''}</span></div>
-    </div>
-    <div class="controls">
-      <button data-act="toggle" title="Play / pause (space)">${playing ? ICONS.pause : ICONS.play}</button>
-      <button data-act="next" title="Next in queue (n)">${ICONS.next}</button>
-    </div>
-    <div class="bar"><i id="now-bar" style="width:${dur ? Math.min(100, (pos / dur) * 100) : 0}%"></i></div>`;
+  const live = (k) => $(`#now [data-live="${k}"]`) || {};
+  const t = ep.tracks && trackAt(ep.tracks, pos);
+  live('time').textContent = `${fmtTime(pos)}${dur ? ` / ${fmtTime(dur)}` : ''}`;
+  live('track').textContent = t ? trackName(t) : '';
+  live('next').disabled = !trackAfter(ep, pos);
+  if (live('bar').style) live('bar').style.width = `${dur ? Math.min(100, (pos / dur) * 100) : 0}%`;
 }
 
-function row(item, i) {
-  const { ep } = item;
+function card(c) {
+  const { ep, stack } = c;
   const p = state.progress[ep.alias];
   const pct = p?.dur ? Math.min(100, (p.pos / p.dur) * 100) : 0;
-  const notes = [];
+  const notes = [fmtDate(ep.date)];
   if (pct && !isDone(p) && p.pos > 60) notes.push(`Resume ${fmtTime(p.pos)}`);
-  notes.push(...(item.why || []));
+  notes.push(...(c.why || []), ep.location);
+  const expanded = stack.length && open.has(c.key);
+  // The next two in the stack peek out from behind the cover.
+  const under = stack
+    .slice(0, 2)
+    .map((s, i) => `<img class="under u${i + 1}" src="${esc(s.ep.thumb || s.ep.image)}" alt="" />`)
+    .reverse()
+    .join('');
   return `
-    <article class="row${i === focus ? ' focus' : ''}" data-alias="${esc(ep.alias)}" data-i="${i}">
-      <button class="grip" data-grip title="Drag to reorder (alt + up/down)">${ICONS.grip}</button>
-      <div class="thumb">
-        <img src="${esc(ep.image || ep.thumb)}" alt="" loading="lazy" />
-        ${pct ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
-      </div>
-      <div class="body">
-        <a class="title" href="${NTS}${esc(ep.path)}" target="_blank">${esc(ep.name || ep.alias)}</a>
-        <div class="meta">${esc([fmtDate(ep.date), ep.location].filter(Boolean).join(' · '))}</div>
-        <div class="tags">
-          ${ep.genres.slice(0, 4).map((g) => `<span class="tag">${esc(g)}</span>`).join('')}
+    <div class="card${stack.length ? ' stacked' : ''}" data-key="${esc(c.key)}" data-ep="${esc(ep.alias)}">
+      <article class="row" data-alias="${esc(ep.alias)}">
+        <button class="grip" data-grip title="Drag to reorder (alt + up/down)">${ICONS.grip}</button>
+        <div class="thumb">
+          ${under}
+          <img src="${esc(ep.image || ep.thumb)}" alt="" loading="lazy" />
+          ${pct ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
+          ${
+            stack.length
+              ? `<button class="stack-n${expanded ? ' on' : ''}" data-act="expand" title="${stack.length + 1} episodes from this show, newest first. One plays per turn">${stack.length + 1}</button>`
+              : ''
+          }
         </div>
-        ${notes.length ? `<div class="why">${esc(notes.join(' · '))}</div>` : ''}
-      </div>
-      <div class="actions">
-        <button data-act="play" title="Play (enter)">${ICONS.play}</button>
-        <button data-act="remove" title="Remove (x)">${ICONS.remove}</button>
-      </div>
-    </article>`;
+        <div class="body">
+          <a class="title" href="${NTS}${esc(ep.path)}" target="_blank">${esc(ep.name || ep.alias)}</a>
+          <div class="meta">${esc(notes.filter(Boolean).join(' · '))}</div>
+          <div class="tags line">${ep.genres.map((g) => `<span class="tag">${esc(g)}</span>`).join('')}</div>
+        </div>
+        <div class="actions">
+          <button data-act="play" title="Play (enter)">${ICONS.play}</button>
+          <button data-act="menu" title="More">${ICONS.more}</button>
+        </div>
+      </article>
+      ${expanded ? `<div class="subs">${stack.map(sub).join('')}</div>` : ''}
+    </div>`;
 }
 
+// The rest of an expanded stack, in the order they'll play.
+const sub = ({ ep }) => `
+  <div class="sub" data-alias="${esc(ep.alias)}" data-ep="${esc(ep.alias)}">
+    <img src="${esc(ep.thumb || ep.image)}" alt="" loading="lazy" />
+    <div class="body">
+      <a class="title" href="${NTS}${esc(ep.path)}" target="_blank">${esc(ep.name || ep.alias)}</a>
+      <div class="meta">${esc(fmtDate(ep.date))}</div>
+    </div>
+    <button data-act="play" title="Play">${ICONS.play}</button>
+    <button data-act="menu" title="More">${ICONS.more}</button>
+  </div>`;
+
 function renderQueue(prof) {
-  const items = orderQueue(state, prof).filter((i) => i.alias !== state.now?.alias);
-  rows = items.map((i) => i.alias);
-  $('#list').innerHTML = items.length
-    ? items.map((it, i) => row(it, i)).join('')
-    : '<div class="empty">Nothing queued. New episodes show up here as NTS adds them.</div>';
+  const items = orderQueue(state, prof);
+  rows = items.map((c) => c.alias);
+  cards = new Map(items.map((c) => [c.key, c]));
+  if (items.length) patch($('#list'), items.map((c) => ({ key: c.key, html: card(c) })));
+  else $('#list').innerHTML = '<div class="empty">Nothing queued. New episodes show up here as NTS adds them.</div>';
   $('#foot').innerHTML = `
     <form class="add" data-form="add">
       <input name="urls" placeholder="Paste NTS episode links to add" autocomplete="off" />
@@ -141,11 +279,12 @@ function renderQueue(prof) {
     </form>
     <label class="setting" style="padding:0">
       <input type="checkbox" data-act="autoAdvance" ${state.settings.autoAdvance ? 'checked' : ''} />
-      Play the next one when a mix ends
+      Play the next one when an episode ends
     </label>
     <span>Checked ${ago(state.polledAt)}</span>
     <button data-act="poll">Check now</button>
-    <div class="keys">Keys: J/K move · Enter play · X remove · Alt+↑/↓ reorder · Space play/pause · N next. Drag a mix by its grip to reorder, drag an episode link here, paste one, or right-click it on nts.live to add it.</div>`;
+    <div class="keys">Keys: J/K move · Enter play · Shift+Enter play next · X remove · Alt+↑/↓ reorder · Space play/pause · N skip · Shift+N next track.</div>
+    <div class="keys">A show's episodes stack on one card and play newest first, one per turn. After you hear one, that show waits for three others. Drag a card by its grip to reorder. To add an episode, drag or paste its link here, or right-click it on nts.live.</div>`;
 }
 
 const dayLabel = (ts) => {
@@ -168,7 +307,7 @@ function renderTracks() {
       <button class="track${live ? ' live' : ''}" data-act="jump" data-alias="${esc(t.alias)}" data-path="${esc(t.path)}" data-offset="${t.offset}" title="Jump to the start of this track">
         <img src="${esc(ep?.thumb || ep?.image || '')}" alt="" loading="lazy" />
         <div>
-          <div class="name">${esc([t.artist, t.title].filter(Boolean).join(' — '))}</div>
+          <div class="name">${esc(trackName(t))}</div>
           <div class="meta">${esc(ep?.name || t.alias)} · ${fmtTime(t.offset)}</div>
         </div>
         <time>${live ? 'Playing' : new Date(t.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>
@@ -177,7 +316,7 @@ function renderTracks() {
   $('#list').innerHTML = plays.length
     ? html.join('')
     : '<div class="empty">Tracks show up here as they play. Click one to jump back to it.</div>';
-  $('#foot').innerHTML = `<div class="keys">Tracks come from NTS's tracklists, so mixes without one aren't listed.</div>`;
+  $('#foot').innerHTML = `<div class="keys">Tracks come from NTS's tracklists, so episodes without one aren't listed.</div>`;
 }
 
 function renderHosts(prof) {
@@ -206,7 +345,7 @@ function renderHosts(prof) {
     <div class="genres tags">${
       genres.length
         ? genres.map(([g]) => `<span class="tag">${esc(g)}</span>`).join('')
-        : '<span class="meta">Builds up as you save, finish and queue mixes.</span>'
+        : '<span class="meta">Builds up as you save, finish and queue episodes.</span>'
     }</div>`;
   $('#foot').innerHTML = `
     <span>Synced from My NTS ${ago(state.follows.syncedAt)}</span>
@@ -215,23 +354,35 @@ function renderHosts(prof) {
     <div class="keys">New episodes from these hosts rank higher in your queue.</div>`;
 }
 
+// Genre chips stay on one line and scroll sideways; fade the edge while
+// there's more to see.
+function fadeChips(el) {
+  el.classList.toggle('more', el.scrollWidth - el.scrollLeft - el.clientWidth > 1);
+}
+
 function render() {
   if (!state) return;
   const prof = buildProfile(state);
+  const animate = shown === view;
+  shown = view;
   document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
   const queued = state.queue.filter((q) => q.alias !== state.now?.alias).length;
   $('#count-queue').textContent = queued || '';
   const input = $('.add input');
   const typed = input?.value;
   const hadFocus = input && document.activeElement === input;
-  renderNow();
-  if (view === 'queue') renderQueue(prof);
-  else if (view === 'tracks') renderTracks();
-  else renderHosts(prof);
+  flip(() => {
+    renderNow();
+    if (view === 'queue') renderQueue(prof);
+    else if (view === 'tracks') renderTracks();
+    else renderHosts(prof);
+  }, animate);
   const again = $('.add input');
   if (again && typed) again.value = typed;
   if (again && hadFocus) again.focus();
   focus = Math.min(focus, Math.max(0, rows.length - 1));
+  showFocus();
+  document.querySelectorAll('.tags.line').forEach(fadeChips);
 }
 
 async function refresh() {
@@ -244,6 +395,7 @@ async function refresh() {
 function setView(v) {
   view = v;
   focus = 0;
+  closeMenu();
   try {
     localStorage.setItem('view', v);
   } catch {}
@@ -251,38 +403,132 @@ function setView(v) {
   $('#scroll').scrollTo(0, 0);
 }
 
+const cardEls = () => [...document.querySelectorAll('#list > .card')];
+
+function showFocus() {
+  cardEls().forEach((el, i) => el.querySelector('.row').classList.toggle('focus', i === focus));
+}
+
 function setFocus(i) {
   focus = Math.max(0, Math.min(rows.length - 1, i));
-  document.querySelectorAll('.row').forEach((r) => r.classList.toggle('focus', Number(r.dataset.i) === focus));
+  showFocus();
   document.querySelector('.row.focus')?.scrollIntoView({ block: 'nearest' });
+}
+
+// What to slide out when an episode leaves the queue: its whole card, unless
+// it's one of a stack that stays.
+function shownEl(alias) {
+  const el = document.querySelector(`#list [data-alias="${CSS.escape(alias)}"]`);
+  return el?.matches('.row') && !el.closest('.stacked') ? el.closest('.card') : el;
 }
 
 async function act(name, el) {
   if (name === 'autoAdvance') return send({ type: 'settings', settings: { autoAdvance: !state.settings.autoAdvance } });
-  const { alias, path, offset } = { ...el?.closest('[data-alias]')?.dataset, ...el?.dataset };
+  if (name === 'menu') return toggleMenu(el);
+  if (name === 'expand') return toggleStack(el.closest('.card').dataset.key);
+  if (name === 'nextTrack') return nextTrack();
+  closeMenu();
+  const { alias, path, offset, key } = { ...el?.closest('[data-alias]')?.dataset, ...el?.dataset };
   if (name === 'poll') toast('Checking Latest…');
   if (name === 'sync') toast('Syncing from My NTS in a background tab…');
-  // Toggle says which way, as the button showed it, so it can't flip the wrong way.
-  const msg =
-    name === 'jump'
-      ? { type: name, alias, path, offset: Number(offset) }
-      : name === 'toggle'
-        ? { type: name, play: !isPlaying(state?.now) }
-        : alias
-          ? { type: name, alias }
-          : { type: name };
-  // Starting can mean loading the mix in a tab, which takes a few seconds.
-  const starting = ['play', 'jump', 'next'].includes(name) || msg.play === true;
+  let msg = alias ? { type: name, alias } : { type: name };
+  let leaving = null;
+  if (name === 'jump') {
+    msg = { type: name, alias, path, offset: Number(offset) };
+    seek = { alias, pos: msg.offset, at: Date.now() };
+  } else if (name === 'toggle') {
+    // Says which way, as the button showed it, so it can't flip the wrong way.
+    msg = { type: name, play: !isPlaying(state?.now) };
+  } else if (name === 'remove') {
+    msg = { type: name, aliases: [alias] };
+    leaving = shownEl(alias);
+  } else if (name === 'removeStack') {
+    const c = cards.get(key);
+    msg = { type: 'remove', aliases: [c.alias, ...c.stack.map((s) => s.alias)] };
+    leaving = shownEl(c.alias)?.closest('.card');
+  } else if (name === 'skip' && state?.now?.alias) {
+    leaving = $('#now');
+  }
+  await leave(leaving, leaving?.id === 'now' ? -40 : 40);
+  return run(msg, leaving);
+}
+
+// Sends a command and reports how it went.
+async function run(msg, leaving) {
+  // Starting can mean loading the episode in a tab, which takes a few seconds.
+  const starting = ['play', 'jump', 'skip'].includes(msg.type) || msg.play === true;
   const slow = starting && setTimeout(() => toast('Loading in your NTS tab…'), 400);
   const r = await send(msg);
   clearTimeout(slow);
+  if (!r?.ok || r.value?.empty) back(leaving);
   if (r?.value?.empty) toast('Queue is empty');
   else if (r?.value?.started === false) toast("Switched to the NTS tab. Press play there if it hasn't started");
   else if (r?.ok && starting) $('#toast').hidden = true;
   return r;
 }
 
+// Jumps to the start of the next listed track in the episode playing.
+function nextTrack() {
+  const n = state?.now;
+  const ep = n?.alias && state.eps[n.alias];
+  if (!ep) return;
+  if (!ep.tracks?.length) return toast('No tracklist for this episode');
+  const t = trackAfter(ep, livePosition());
+  if (!t) return toast("That's the last listed track");
+  seek = { alias: n.alias, pos: t.offset, at: Date.now() };
+  tickNow();
+  return run({ type: 'jump', alias: n.alias, path: ep.path, offset: t.offset });
+}
+
+function toggleStack(key) {
+  if (!open.delete(key)) open.add(key);
+  render();
+}
+
+// --- menu ----------------------------------------------------------------------
+
+const menu = $('#menu');
+
+function toggleMenu(btn) {
+  if (menu._for === btn) return closeMenu();
+  closeMenu();
+  const el = btn.closest('[data-alias]');
+  const card = btn.closest('.card');
+  const c = cards.get(card.dataset.key);
+  const items = [
+    ['top', 'Play next'],
+    ['remove', 'Remove'],
+  ];
+  if (el.matches('.row') && c?.stack.length) items.push(['removeStack', `Remove all ${c.stack.length + 1}`]);
+  menu.innerHTML = items.map(([a, label]) => `<button data-act="${a}">${label}</button>`).join('');
+  menu.dataset.alias = el.dataset.alias;
+  menu.dataset.key = card.dataset.key;
+  menu._for = btn;
+  btn.classList.add('on');
+  menu.hidden = false;
+  // Under the button, right edges lined up; above it if there's no room.
+  const b = btn.getBoundingClientRect();
+  const m = menu.getBoundingClientRect();
+  const below = b.bottom + 4 + m.height <= innerHeight - 8;
+  menu.style.top = `${below ? b.bottom + 4 : b.top - 4 - m.height}px`;
+  menu.style.left = `${Math.max(8, b.right - m.width)}px`;
+  if (!still.matches) {
+    menu.animate([{ opacity: 0, transform: `translateY(${below ? -4 : 4}px)` }, { opacity: 1, transform: 'none' }], {
+      duration: 120,
+      easing: 'ease-out',
+    });
+  }
+}
+
+function closeMenu() {
+  if (menu.hidden) return;
+  menu.hidden = true;
+  menu._for?.classList.remove('on');
+  menu._for = null;
+}
+
 document.addEventListener('click', (e) => {
+  if (!e.target.closest('#menu, [data-act="menu"]')) closeMenu();
   const tab = e.target.closest('[data-view]');
   if (tab) return setView(tab.dataset.view);
   const btn = e.target.closest('[data-act]');
@@ -291,15 +537,25 @@ document.addEventListener('click', (e) => {
   act(btn.dataset.act, btn);
 });
 
+document.addEventListener(
+  'scroll',
+  (e) => {
+    if (e.target.matches?.('.tags.line')) fadeChips(e.target);
+    else closeMenu();
+  },
+  true,
+);
+
 // --- reordering ------------------------------------------------------------------
 
-// Drag a row by its grip. The row follows the pointer and the others slide
-// out of the way; on release the new order is sent to the background.
-function startSort(e, rowEl) {
+// Drag a card by its grip. The card follows the pointer and the others slide
+// out of the way; on release it settles into place and the new order is sent
+// to the background.
+function startSort(e, cardEl) {
   const list = $('#list');
   const scroller = $('#scroll');
-  const els = [...list.querySelectorAll('.row')];
-  const from = els.indexOf(rowEl);
+  const els = cardEls();
+  const from = els.indexOf(cardEl);
   const grip = e.target.closest('.grip');
   const box = els.map((el) => ({ top: el.offsetTop, h: el.offsetHeight }));
   const startY = e.clientY;
@@ -310,7 +566,7 @@ function startSort(e, rowEl) {
   let frame = 0;
 
   const place = () => {
-    // Keep the row inside the list as the pointer or the scroll position moves.
+    // Keep the card inside the list as the pointer or the scroll position moves.
     const dy = y - startY + (scroller.scrollTop - startScroll);
     const top = Math.max(0, Math.min(list.offsetHeight - box[from].h, box[from].top + dy));
     const mid = top + box[from].h / 2;
@@ -323,7 +579,7 @@ function startSort(e, rowEl) {
       else if (j < from && m > mid) (shift = box[from].h), to--;
       el.style.transform = shift ? `translateY(${shift}px)` : '';
     });
-    rowEl.style.transform = `translateY(${top - box[from].top}px)`;
+    cardEl.style.transform = `translateY(${top - box[from].top}px)`;
   };
 
   const loop = () => {
@@ -340,8 +596,9 @@ function startSort(e, rowEl) {
     if (active || Math.abs(y - startY) < 4) return;
     active = true;
     sorting = true;
+    closeMenu();
     document.body.classList.add('sorting');
-    rowEl.classList.add('dragging');
+    cardEl.classList.add('dragging');
     frame = requestAnimationFrame(loop);
   };
 
@@ -353,16 +610,18 @@ function startSort(e, rowEl) {
     document.removeEventListener('keydown', onKey);
     if (!active) return;
     document.body.classList.remove('sorting');
-    els.forEach((el) => (el.style.transform = ''));
-    rowEl.classList.remove('dragging');
     sorting = false;
-    if (commit && to !== from) {
+    const moved = commit && to !== from;
+    // Settle from wherever the drag left everything.
+    flip(() => {
+      els.forEach((el) => (el.style.transform = ''));
+      if (moved) list.insertBefore(cardEl, to > from ? els[to].nextSibling : els[to]);
+    });
+    setTimeout(() => cardEl.classList.remove('dragging'), 280);
+    if (moved) {
       const order = [...rows];
       order.splice(to, 0, ...order.splice(from, 1));
-      list.insertBefore(rowEl, to > from ? els[to].nextSibling : els[to]);
-      reorder(order, to);
-    } else {
-      refresh();
+      reorder(order, to, from);
     }
   };
   const up = () => finish(true);
@@ -380,12 +639,12 @@ document.addEventListener('pointerdown', (e) => {
   if (e.button !== 0 || !e.target.closest('.grip')) return;
   e.preventDefault();
   document.body.classList.remove('keys');
-  startSort(e, e.target.closest('.row'));
+  startSort(e, e.target.closest('.card'));
 });
 
-async function reorder(order, moved) {
+async function reorder(order, moved, from) {
   rows = order;
-  await send({ type: 'reorder', aliases: order, moved });
+  await send({ type: 'reorder', aliases: order, moved, from });
   refresh();
 }
 
@@ -454,23 +713,28 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     const order = [...rows];
     order.splice(to, 0, ...order.splice(focus, 1));
-    focus = to;
-    reorder(order, to);
+    const els = cardEls();
+    const from = focus;
+    flip(() => $('#list').insertBefore(els[from], to > from ? els[to].nextSibling : els[to]));
+    setFocus(to);
+    reorder(order, to, from);
     return;
   }
   if (e.altKey) return;
   const alias = rows[focus];
+  const row = () => document.querySelector('.row.focus');
   const listKeys = {
     j: () => setFocus(focus + 1),
     arrowdown: () => setFocus(focus + 1),
     k: () => setFocus(focus - 1),
     arrowup: () => setFocus(focus - 1),
-    enter: () => alias && view === 'queue' && act('play', document.querySelector('.row.focus')),
-    x: () => alias && view === 'queue' && act('remove', document.querySelector('.row.focus')),
+    enter: () => alias && view === 'queue' && act(e.shiftKey ? 'top' : 'play', row()),
+    x: () => alias && view === 'queue' && act('remove', row()),
   };
   const globalKeys = {
     ' ': () => act('toggle'),
-    n: () => act('next'),
+    n: () => (e.shiftKey ? nextTrack() : act('skip')),
+    escape: () => closeMenu(),
     1: () => setView('queue'),
     2: () => setView('tracks'),
     3: () => setView('hosts'),
@@ -483,7 +747,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 // Re-render on any stored change. Playback ticks (position saves) only touch
-// the now-playing bar, so a click or hover on a row isn't pulled out from
+// the now-playing card, so a click or hover on a row isn't pulled out from
 // under the pointer every few seconds.
 let pendingRender = false;
 let changed = new Set();
@@ -505,15 +769,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }, 100);
 });
 
-setInterval(() => {
-  const n = state?.now;
-  if (!isPlaying(n)) return;
-  const dur = state.progress[n.alias]?.dur || n.dur || 0;
-  const pos = livePosition();
-  const time = $('#now-time');
-  const bar = $('#now-bar');
-  if (time) time.textContent = `${fmtTime(pos)}${dur ? ` / ${fmtTime(dur)}` : ''}`;
-  if (bar && dur) bar.style.width = `${Math.min(100, (pos / dur) * 100)}%`;
-}, 1000);
+setInterval(() => isPlaying(state?.now) && tickNow(), 1000);
 
 refresh();

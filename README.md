@@ -12,11 +12,13 @@ On install, the extension opens My NTS in a background tab for a few seconds to 
 
 ## How it works
 
-- **Queue.** Every 30 minutes the extension reads NTS's public Latest feed and adds every episode it sees, so nothing is missed however irregularly you check. Episodes are often added a day or two after they air, so it tracks episode IDs rather than dates. The queue is sorted by how well each mix fits what you save, finish and queue, with hosts you follow (the heart on NTS) ranked higher.
-- **Order.** Mixes you've placed by hand come first, then partly played ones, then a chain where each pick weighs its own score against how well it follows the previous one: shared genres, moods and tracklist artists, and a similar intensity.
-- **Reordering.** Drag a mix by its grip (or focus it and press Alt+↑/↓). Everything down to where you dropped it keeps the order you see; the rest stays ranked.
-- **Playing.** Play on a row loads that mix in your NTS tab (opening one if needed) and the mix that was playing goes to the top of the queue. Play/pause in the panel picks up in that tab if the mix is still loaded there, and otherwise loads it again where you left off, so it works after the tab was closed, reloaded or put to sleep, or Chrome restarted.
-- **Tracks.** Each track is logged as it starts playing, using NTS's tracklist timestamps. Click one to jump to its start, in the same mix if it's still playing or by reloading it.
+- **Queue.** Every 30 minutes the extension reads NTS's public Latest feed and adds every episode it sees, so nothing is missed however irregularly you check. Episodes are often added a day or two after they air, so it tracks episode IDs rather than dates. The queue is sorted by how well each episode fits what you save, finish and queue, with hosts you follow (the heart on NTS) ranked higher.
+- **Stacks.** Episodes from the same show share one card, with the next covers peeking out behind and a count you can click to see the rest. A stack plays newest first, one episode per turn: after you hear an episode from a show, at least three others play before that show comes up again. Placing a stack by hand (dragging it, or Play next) overrides that. Guest episodes are never stacked.
+- **Order.** Cards you've placed by hand come first, then partly played ones, then a chain where each pick weighs its own score against how well it follows the previous one: shared genres, moods and tracklist artists, and a similar intensity.
+- **Reordering.** Drag a card by its grip (or focus it and press Alt+↑/↓), or choose **Play next** from its ··· menu. Everything down to where you picked it up or dropped it, whichever is lower, keeps the order you see. The rest stays ranked, in the same order as before.
+- **Playing.** Play on a card loads that episode in your NTS tab (opening one if needed) and the episode that was playing goes to the top of the queue. Play/pause in the panel picks up in that tab if the episode is still loaded there, and otherwise loads it again where you left off, so it works after the tab was closed, reloaded or put to sleep, or Chrome restarted.
+- **Skipping.** Skip (⏭ on the now-playing card) moves on to the next card and takes the current episode out of the queue. Skipping in the first five minutes counts against it, like removing it. Next track (the small ▸▸ beside the current track) jumps to the next tracklist entry in the same episode.
+- **Tracks.** Each track is logged as it starts playing, using NTS's tracklist timestamps. Click one to jump to its start, in the same episode if it's still playing or by reloading it.
 - **Adding.** Drag an episode link from any nts.live tab onto the side panel, paste links into it, or right-click an episode link (or episode page) and choose **Add to Nuts to Soup**.
 
 ### Why NTS used to lose your place
@@ -29,10 +31,12 @@ NTS saves your position to your account only when playback stops: pause, switchi
 |---|---|
 | `J` / `K` | move |
 | `Enter` | play |
-| `Alt` + `↑` / `↓` | move the focused mix |
+| `Shift` + `Enter` | play next |
+| `Alt` + `↑` / `↓` | move the focused card |
 | `X` | remove |
 | `Space` | play / pause |
-| `N` | next |
+| `N` | skip to the next episode |
+| `Shift` + `N` | next track |
 | `1` `2` `3` | queue / tracks / hosts |
 
 ## Files
