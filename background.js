@@ -513,6 +513,12 @@ const handlers = {
   skip: () => serial(skip),
   toggle: (m) => serial(() => toggle(m.play)),
   ended: (m) => onEnded(m.alias),
+  // The tab's stream died (its URLs expire a few hours after it loads), so
+  // load it again there, from where it stopped.
+  stalled: async (m, sender) => {
+    await chrome.storage.session.set({ playerTab: sender.tab.id });
+    return serial(() => play(m.alias, { at: m.at, path: m.path }));
+  },
   nowPlaying: (m, sender) => onNowPlaying(m, sender),
   scraped: (m, sender) => onScraped(m, sender),
   isSyncTab: async (_m, sender) => (await chrome.storage.session.get('syncTab')).syncTab?.id === sender.tab?.id,
