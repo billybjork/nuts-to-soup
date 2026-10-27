@@ -10,6 +10,12 @@
   "background": { "service_worker": "background.js", "type": "module" },
   "side_panel": { "default_path": "panel/panel.html" },
   "action": { "default_title": "Nuts to Soup" },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": { "default": "Alt+Shift+N", "mac": "MacCtrl+N" },
+      "description": "Open the side panel"
+    }
+  },
   "content_scripts": [
     {
       "matches": ["https://www.nts.live/*"],

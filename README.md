@@ -6,7 +6,7 @@ A Chrome extension for listening through NTS Radio's archive: one ranked queue o
 
 1. Go to `chrome://extensions` and turn on **Developer mode**.
 2. Click **Load unpacked** and choose this folder.
-3. Click the toolbar icon to open the side panel.
+3. Click the toolbar icon, or press `Control`+`N` (`Alt`+`Shift`+`N` on Windows/Linux), to open the side panel. Change the shortcut at `chrome://extensions/shortcuts`.
 
 On install, the extension opens My NTS in a background tab for a few seconds to read your follows, saved episodes and history, then closes it. You need to be signed in to nts.live. The same sync runs once a day, and you can run it from the Hosts tab.
 
