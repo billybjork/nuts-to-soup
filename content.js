@@ -75,11 +75,16 @@
     if (m?.mixcloud !== 'playerWidget' || m.type !== 'event') return;
     const { eventName, args = [] } = m.data || {};
     if (eventName === 'progress') {
-      mixcloud = { ...mixcloud, pos: args[0] || 0, dur: args[1] || mixcloud.dur, at: Date.now() };
+      const pos = args[0] || 0;
+      // Progress that moves means playing, even if we missed the play event,
+      // unless it's a straggler from just before a pause.
+      const moved = mixcloud.at > 0 && pos > mixcloud.pos && Date.now() - (mixcloud.pausedAt || 0) > 1500;
+      mixcloud = { ...mixcloud, pos, dur: args[1] || mixcloud.dur, playing: mixcloud.playing || moved, at: Date.now() };
     } else if (eventName === 'play') {
       mixcloud.playing = true;
     } else if (eventName === 'pause') {
       mixcloud.playing = false;
+      mixcloud.pausedAt = Date.now();
       tick();
     } else if (eventName === 'ended') {
       mixcloud.playing = false;
@@ -88,12 +93,14 @@
   });
 
   // In case the widget's events don't reach us, a position NTS keeps moving
-  // forward also counts as playing.
-  let lastSeen = { alias: null, pos: -1 };
+  // forward also counts as playing. NTS updates it about once a second, so
+  // it's judged by when it last moved, and checking more often does no harm.
+  let lastSeen = { alias: null, pos: -1, movedAt: 0 };
   function advancing(ae) {
-    const moved = ae.episodeAlias === lastSeen.alias && ae.currentPositionS > lastSeen.pos;
-    lastSeen = { alias: ae.episodeAlias, pos: ae.currentPositionS };
-    return moved;
+    const now = Date.now();
+    if (ae.episodeAlias !== lastSeen.alias) lastSeen = { alias: ae.episodeAlias, pos: ae.currentPositionS, movedAt: 0 };
+    else if (ae.currentPositionS > lastSeen.pos) lastSeen = { ...lastSeen, pos: ae.currentPositionS, movedAt: now };
+    return now - lastSeen.movedAt < 2500;
   }
 
   // The <audio> NTS is playing the archive through: the one whose position
@@ -114,7 +121,8 @@
       return {
         pos: live ? mixcloud.pos : ae.currentPositionS || 0,
         dur: mixcloud.dur,
-        playing: mixcloud.playing || advancing(ae),
+        // While its events are arriving the widget knows best; a pause stops them.
+        playing: live ? mixcloud.playing : advancing(ae),
         seek: (t) => mixcloudCall('seek', t),
       };
     }
@@ -285,37 +293,66 @@
     return false;
   }
 
-  function toggle() {
-    const button = footer()?.querySelector('[class*="player__play-button"]');
-    if (button) return button.click();
-    const p = player(activeEpisode());
-    if (p?.el) p.el.paused ? p.el.play() : p.el.pause();
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Whether the footer player has this episode. NTS restores it after a page
+  // reload, so it can be loaded without ever having played here.
+  function hasLoaded(alias) {
+    const path = footerPath();
+    return (path ? path.split('/')[4] : activeEpisode().episodeAlias) === alias;
   }
 
-  // Jump within the episode that's playing, starting playback if it's paused.
-  function seek(t) {
+  async function settle(want, ms) {
+    const end = Date.now() + ms;
+    for (;;) {
+      if (player(activeEpisode())?.playing === want) return true;
+      if (Date.now() >= end) return false;
+      await sleep(250);
+    }
+  }
+
+  // Play or pause, and check it took. NTS's own button keeps its UI in step;
+  // if that doesn't work, drive the player directly. Only pressed when the
+  // state differs, so it can't flip the wrong way.
+  async function setPlaying(want) {
     const p = player(activeEpisode());
     if (!p) return false;
-    if (current) Object.assign(current, { floor: 0, target: null });
-    p.seek(t);
-    if (!p.playing) toggle();
-    return true;
+    if (p.playing === want) return true;
+    footer()?.querySelector('[class*="player__play-button"]')?.click();
+    if (await settle(want, 2500)) return true;
+    if (mixcloudFrame()) mixcloudCall(want ? 'play' : 'pause');
+    else if (p.el) want ? p.el.play().catch(() => {}) : p.el.pause();
+    return settle(want, 2500);
   }
 
+  // 'missing': the extension should load the episode instead.
+  // 'blocked': it's there but Chrome wouldn't start it (tab never shown).
+  async function playLoaded(alias) {
+    if (!hasLoaded(alias) || !player(activeEpisode())) return 'missing';
+    return (await setPlaying(true)) ? 'playing' : 'blocked';
+  }
+
+  // Jump within the episode that's loaded, starting playback if it's paused.
+  async function jumpTo(alias, t) {
+    const p = hasLoaded(alias) && player(activeEpisode());
+    if (!p) return 'missing';
+    if (current) Object.assign(current, { floor: 0, target: null });
+    p.seek(t);
+    return (await setPlaying(true)) ? 'playing' : 'blocked';
+  }
+
+  const commands = {
+    load: async (m) => ({ started: await load(m.ep) }),
+    resume: async (m) => ({ state: await playLoaded(m.alias) }),
+    seek: async (m) => ({ state: await jumpTo(m.alias, m.t) }),
+    // Pauses whatever is playing: silence is what was asked for.
+    pause: async () => ({ paused: await setPlaying(false) }),
+  };
+
   chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
-    if (superseded()) return false;
-    if (msg.type === 'seek') {
-      reply({ started: seek(msg.t) });
-      return false;
-    }
-    if (msg.type === 'load') {
-      load(msg.ep).then((started) => reply({ started }));
-      return true;
-    }
-    if (msg.type !== 'toggle') return false;
-    toggle();
-    reply({ ok: true });
-    return false;
+    if (superseded() || !commands[msg?.type]) return false;
+    commands[msg.type](msg).then(reply, () => reply({}));
+    return true;
   });
 
   // --- My NTS -------------------------------------------------------------------

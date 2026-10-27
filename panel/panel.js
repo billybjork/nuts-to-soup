@@ -262,12 +262,23 @@ async function act(name, el) {
   const { alias, path, offset } = { ...el?.closest('[data-alias]')?.dataset, ...el?.dataset };
   if (name === 'poll') toast('Checking Latest…');
   if (name === 'sync') toast('Syncing from My NTS in a background tab…');
-  if (name === 'play' || name === 'jump') toast('Loading in your NTS tab…');
-  const msg = name === 'jump' ? { type: name, alias, path, offset: Number(offset) } : alias ? { type: name, alias } : { type: name };
+  // Toggle says which way, as the button showed it, so it can't flip the wrong way.
+  const msg =
+    name === 'jump'
+      ? { type: name, alias, path, offset: Number(offset) }
+      : name === 'toggle'
+        ? { type: name, play: !isPlaying(state?.now) }
+        : alias
+          ? { type: name, alias }
+          : { type: name };
+  // Starting can mean loading the mix in a tab, which takes a few seconds.
+  const starting = ['play', 'jump', 'next'].includes(name) || msg.play === true;
+  const slow = starting && setTimeout(() => toast('Loading in your NTS tab…'), 400);
   const r = await send(msg);
+  clearTimeout(slow);
   if (r?.value?.empty) toast('Queue is empty');
   else if (r?.value?.started === false) toast("Switched to the NTS tab. Press play there if it hasn't started");
-  else if (r?.ok && (name === 'play' || name === 'jump')) $('#toast').hidden = true;
+  else if (r?.ok && starting) $('#toast').hidden = true;
   return r;
 }
 

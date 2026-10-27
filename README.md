@@ -15,7 +15,7 @@ On install, the extension opens My NTS in a background tab for a few seconds to 
 - **Queue.** Every 30 minutes the extension reads NTS's public Latest feed and adds every episode it sees, so nothing is missed however irregularly you check. Episodes are often added a day or two after they air, so it tracks episode IDs rather than dates. The queue is sorted by how well each mix fits what you save, finish and queue, with hosts you follow (the heart on NTS) ranked higher.
 - **Order.** Mixes you've placed by hand come first, then partly played ones, then a chain where each pick weighs its own score against how well it follows the previous one: shared genres, moods and tracklist artists, and a similar intensity.
 - **Reordering.** Drag a mix by its grip (or focus it and press Alt+↑/↓). Everything down to where you dropped it keeps the order you see; the rest stays ranked.
-- **Playing.** Play on a row loads that mix in your NTS tab (opening one if needed) and the mix that was playing goes to the top of the queue.
+- **Playing.** Play on a row loads that mix in your NTS tab (opening one if needed) and the mix that was playing goes to the top of the queue. Play/pause in the panel picks up in that tab if the mix is still loaded there, and otherwise loads it again where you left off, so it works after the tab was closed, reloaded or put to sleep, or Chrome restarted.
 - **Tracks.** Each track is logged as it starts playing, using NTS's tracklist timestamps. Click one to jump to its start, in the same mix if it's still playing or by reloading it.
 - **Adding.** Drag an episode link from any nts.live tab onto the side panel, paste links into it, or right-click an episode link (or episode page) and choose **Add to Nuts to Soup**.
 

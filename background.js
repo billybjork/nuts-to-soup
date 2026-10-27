@@ -256,9 +256,10 @@ async function onScraped(msg, sender) {
 // Tabs that were already open when the extension was installed or reloaded
 // have no content script (or an orphaned one), so inject it if nothing answers.
 // A newer copy retires any older one on the page.
-async function sendToTab(tabId, msg) {
+// `tries` is in half seconds; a tab that's still loading needs the full 20.
+async function sendToTab(tabId, msg, tries = 40) {
   let injected = false;
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < tries; i++) {
     try {
       return await chrome.tabs.sendMessage(tabId, msg);
     } catch {
@@ -273,12 +274,16 @@ async function sendToTab(tabId, msg) {
 }
 
 // One NTS tab does the playing: the one last used, else whichever is audible,
-// pinned or open, else a new pinned tab.
-async function playerTab(ep) {
+// pinned or open. The last-used tab is forgotten when Chrome restarts.
+async function findPlayerTab() {
   const { playerTab: lastId, syncTab } = await chrome.storage.session.get(['playerTab', 'syncTab']);
   const tabs = (await chrome.tabs.query({ url: `${NTS}/*` })).filter((t) => t.id !== syncTab?.id);
-  let tab =
-    tabs.find((t) => t.id === lastId) || tabs.find((t) => t.audible) || tabs.find((t) => t.pinned) || tabs[0];
+  return tabs.find((t) => t.id === lastId) || tabs.find((t) => t.audible) || tabs.find((t) => t.pinned) || tabs[0];
+}
+
+// The player tab, opening a new pinned one if there's none.
+async function playerTab(ep) {
+  let tab = await findPlayerTab();
   if (!tab) {
     // Chrome won't start media in a tab that has never been shown, so open it in front.
     tab = await chrome.tabs.create({ url: NTS + ep.path, pinned: true, active: true });
@@ -287,6 +292,30 @@ async function playerTab(ep) {
   }
   await chrome.storage.session.set({ playerTab: tab.id });
   return tab;
+}
+
+// The player tab, if there's one that's awake to take a command. A discarded
+// tab has nothing loaded, so playing it means loading again.
+async function livePlayerTab() {
+  const tab = await findPlayerTab();
+  return tab && !tab.discarded ? tab : null;
+}
+
+async function markPlaying(alias, playing) {
+  await mutate((t) => {
+    if (t.now?.alias !== alias) return [];
+    t.now = { ...t.now, playing, at: Date.now() };
+    return ['now'];
+  });
+}
+
+// Playback commands run one at a time, so a double press or a play straight
+// after a pause can't interleave with a load still in progress.
+let playback = Promise.resolve();
+function serial(fn) {
+  const run = playback.then(fn);
+  playback = run.catch(() => {});
+  return run;
 }
 
 // `front`: the mix being left goes to the top of the queue. `at`: start there
@@ -322,13 +351,7 @@ async function play(alias, { front, at, path } = {}) {
   // restored after a restart), and may block autoplay. Showing the tab lets
   // the former through and puts the play button in reach for the latter.
   if (!started) await chrome.tabs.update(tab.id, { active: true });
-  else {
-    await mutate((t) => {
-      if (t.now?.alias !== alias) return [];
-      t.now = { ...t.now, playing: true, at: Date.now() };
-      return ['now'];
-    });
-  }
+  else await markPlaying(alias, true);
   return { started };
 }
 
@@ -340,20 +363,45 @@ async function next() {
   return play(first.alias);
 }
 
-async function command(type, extra) {
-  const { playerTab: id } = await chrome.storage.session.get('playerTab');
-  if (!id) throw new Error('Nothing playing');
-  return chrome.tabs.sendMessage(id, { type, ...extra });
+// Asks the player tab to play (msg.type 'resume') or seek in (msg.type
+// 'seek') the mix it already has loaded, which NTS restores after a reload. Null when it doesn't have it, or
+// there's no tab to ask, and the mix needs loading.
+async function inPlayerTab(msg) {
+  const tab = await livePlayerTab();
+  if (!tab) return null;
+  const r = await sendToTab(tab.id, msg, 6).catch(() => null);
+  if (r?.state === 'playing') {
+    await chrome.storage.session.set({ playerTab: tab.id });
+    await markPlaying(msg.alias, true);
+    return { started: true };
+  }
+  if (r?.state === 'blocked') {
+    // Same as in play(): showing the tab lets Chrome start the media.
+    await chrome.tabs.update(tab.id, { active: true });
+    return { started: false };
+  }
+  return null;
+}
+
+// Play/pause from the panel. `want` is what its button showed, so a stale
+// playing flag can't turn a press of play into a pause. Playing picks up in
+// the tab if the mix is still loaded there, and otherwise loads it again
+// where you left off (tab closed, reloaded, discarded, Chrome restarted).
+async function toggle(want) {
+  const { now } = await load();
+  if (!now?.alias) return want ? next() : null;
+  if (want) return (await inPlayerTab({ type: 'resume', alias: now.alias })) || play(now.alias);
+  const tab = await livePlayerTab();
+  if (tab) await sendToTab(tab.id, { type: 'pause' }, 6).catch(() => {});
+  await markPlaying(now.alias, false); // nothing left that could be playing it
+  return null;
 }
 
 // Jump to the start of a track: in place if its mix is the one playing.
 async function jump({ alias, path, offset }) {
   if ((await load()).now?.alias === alias) {
-    try {
-      return await command('seek', { t: offset });
-    } catch {
-      // the player tab is gone; start the mix again below
-    }
+    const r = await inPlayerTab({ type: 'seek', alias, t: offset });
+    if (r) return r;
   }
   return play(alias, { at: offset, path });
 }
@@ -388,7 +436,7 @@ async function onEnded(alias) {
     return ['done', 'queue'];
   });
   // Let NTS's own "up next" carry on if our queue is empty.
-  if (s.settings.autoAdvance && s.queue.length) await next();
+  if (s.settings.autoAdvance && s.queue.length) await serial(next);
 }
 
 // The content script reports whatever NTS starts playing, including episodes
@@ -437,10 +485,10 @@ async function add(urls) {
 // --- messages -----------------------------------------------------------------
 
 const handlers = {
-  play: (m) => play(m.alias, { front: true }),
-  jump: (m) => jump(m),
-  next: () => next(),
-  toggle: () => command('toggle'),
+  play: (m) => serial(() => play(m.alias, { front: true })),
+  jump: (m) => serial(() => jump(m)),
+  next: () => serial(next),
+  toggle: (m) => serial(() => toggle(m.play)),
   ended: (m) => onEnded(m.alias),
   nowPlaying: (m, sender) => onNowPlaying(m, sender),
   scraped: (m, sender) => onScraped(m, sender),
