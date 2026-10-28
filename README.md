@@ -39,6 +39,69 @@ NTS saves your position to your account only when playback stops: pause, switchi
 | `Shift` + `N`     | next track               |
 | `1` `2` `3`       | queue / tracks / hosts   |
 
+## Terminal
+
+`nts` and `nts tui` control the extension from a terminal. Chrome still does the playing, in your NTS tab, so plays count for hosts and show up in your NTS history.
+
+```
+nts CLI / TUI ──NDJSON over a Unix socket──▶ native host ──native messaging──▶ the extension ──▶ NTS tab
+```
+
+### Install
+
+macOS only for now. Needs Node.js 22.13 or newer.
+
+```sh
+cd tui
+npm install
+npm run install-host
+```
+
+Then reload the extension at `chrome://extensions`. `install-host` writes:
+
+- the host manifest, `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.billybjork.nuts_to_soup.json`, allowing only this extension (its ID comes from the `key` in `manifest.json`)
+- `~/Library/Application Support/nuts-to-soup/host`, which runs `tui/host.js`. The host listens on `bridge.sock` in the same folder (owner-only) and logs to `host.log`
+- `~/.local/bin/nts`. Pass `--bin DIR` to put it somewhere else
+
+Chrome starts native hosts with a minimal environment, so both wrappers run the `node` you installed with by its absolute path. Run `npm run install-host` again after switching Node versions, and `npm run uninstall-host` to remove all of the above.
+
+The extension connects to the host when Chrome starts and stays connected, which also keeps its service worker running. If you use the extension in two Chrome profiles, the first one to connect serves the terminal.
+
+### CLI
+
+```
+nts status [--json]          what's playing, where, and the current track
+nts toggle                   play or pause
+nts play | nts pause
+nts play <n | alias | url>   play queue card n, an episode, or an NTS link (added if new)
+nts skip                     next episode
+nts next                     next track in this episode
+nts queue [-n N] [--json]    the queue in play order, as the panel shows it
+nts add <url>...             add episode links
+nts sync                     sync from My NTS
+nts tui                      the full-screen player
+```
+
+If Chrome isn't running, `nts` starts it in the background (`open -g`) and waits up to 10 seconds for the extension to connect. Commands that start playback can still need the NTS tab brought to the front, as in the panel; `nts` says when.
+
+### TUI
+
+`nts tui` shows the queue (stacked by show), what's playing with its progress and current track, and the Tracks and Hosts views. It updates as the extension's state changes. Keys are the panel's: `J`/`K`, `Enter` play, `Shift`+`Enter` play next (or `T`, for terminals that can't tell it from `Enter`), `Alt`+`↑`/`↓` reorder, `X` remove, `Space` play/pause, `N` skip, `Shift`+`N` next track, `1` `2` `3` views, `Q` quit. If Chrome quits, it waits and reconnects when Chrome is back.
+
+### Rex
+
+[`tui/rex/init.lua`](tui/rex/init.lua) is an example [Rex](https://www.superlogical.com/rex) config. Copy it into `~/.config/rex/init.lua` (or `require` it from there) and run `rex config reload`. It defines `nts_toggle`, `nts_skip`, `nts_next`, `nts_status` and `nts_player` (the TUI in a floating pane, toggled), bound behind `Ctrl`+`Cmd`+`N`:
+
+| `Ctrl`+`Cmd`+`N`, then |                                 |
+| ---------------------- | ------------------------------- |
+| `Space`                | play / pause                    |
+| `N`                    | skip to the next episode        |
+| `Shift` + `N`          | next track                      |
+| `S`                    | what's playing (a notification) |
+| `P`                    | open or close the player        |
+
+The actions run `nts` with `rex.exec`, which doesn't hold up the Rex server while a command waits. Try one before reloading with `rex do tui/rex/init.lua --action nts_status`.
+
 ## Files
 
 - `background.js`: polling, sync, queue state, playback commands
@@ -46,7 +109,10 @@ NTS saves your position to your account only when playback stops: pause, switchi
 - `lib/nts.js`: public NTS API
 - `lib/rank.js`: scoring, taste profile, queue order
 - `lib/store.js`: storage layout
+- `lib/view.js`: what the panel and the terminal show, from the stored state
+- `lib/messages.js`: message validation
 - `panel/`: the side panel
+- `tui/`: the terminal bridge, `nts` CLI and TUI (its own package.json; the extension itself has no dependencies)
 
 No build step. Edit, then press reload on `chrome://extensions`. Reload any open nts.live tabs afterwards, since their old content script stops talking to the extension.
 
