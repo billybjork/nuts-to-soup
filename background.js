@@ -1,14 +1,14 @@
+import { validateMessage } from './lib/messages.js';
 import {
   NTS,
   LATEST_MAX_OFFSET,
   fetchLatest,
   fetchEpisode,
   fetchTracks,
-  fetchShow,
   parsePath,
   trackAt,
 } from './lib/nts.js';
-import { load, save, isDone } from './lib/store.js';
+import { load, save, isDone, progressKey } from './lib/store.js';
 import { buildProfile, orderQueue, stackKey } from './lib/rank.js';
 
 const POLL_MINUTES = 30;
@@ -30,7 +30,7 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
       targetUrlPatterns: [`${NTS}/shows/*/episodes/*`],
     }),
   );
-  if (reason === 'install') sync();
+  if (reason === 'install') await sync();
 });
 chrome.runtime.onStartup.addListener(setup);
 
@@ -46,8 +46,13 @@ chrome.contextMenus.onClicked.addListener(({ linkUrl, pageUrl }) => {
 });
 
 chrome.alarms.onAlarm.addListener(({ name }) => {
-  if (name === 'poll') poll();
-  if (name === 'sync') sync();
+  if (name === 'sync-timeout')
+    syncSerial(async () => {
+      const { syncTab } = await chrome.storage.session.get('syncTab');
+      if (syncTab && Date.now() - syncTab.startedAt >= 150_000) await finishSync('Sync timed out');
+    }).catch(console.error);
+  if (name === 'poll') poll().catch(console.error);
+  if (name === 'sync') sync().catch(console.error);
 });
 
 // Older versions kept an inbox beside the queue, and an "up next" pin instead
@@ -81,7 +86,7 @@ function mutate(fn) {
   return locked(async () => {
     const s = await load();
     const keys = fn(s) || [];
-    await save(Object.fromEntries(keys.map((k) => [k, s[k]])));
+    if (keys.length) await save(Object.fromEntries(keys.map((k) => [k, s[k]])));
     return s;
   });
 }
@@ -110,7 +115,7 @@ function prune(s) {
     ...s.history,
     ...recent(s.done, 300),
     ...recent(s.dismissed, 300),
-    ...s.plays.slice(0, 200).map((p) => p.alias),
+    ...s.plays.map((p) => p.alias),
   ]);
   if (s.now?.alias) keep.add(s.now.alias);
   for (const a of Object.keys(s.eps)) if (!keep.has(a)) delete s.eps[a];
@@ -127,9 +132,16 @@ const recent = (map, n) =>
 // Latest is ordered by when episodes were added, and episodes are often added
 // a day or two after broadcast, so we track every alias we've seen rather than
 // a date. Two pages are always checked in case something lands out of order.
-async function poll() {
+let polling;
+function poll() {
+  return (polling ??= pollLatest().finally(() => {
+    polling = null;
+  }));
+}
+
+async function pollLatest() {
   const fresh = [];
-  const { seen } = await chrome.storage.local.get('seen');
+  const { seen } = await load();
   const known = new Set(seen || []);
   const firstRun = !known.size;
   for (let offset = 0; offset < LATEST_MAX_OFFSET; offset += PAGE) {
@@ -144,7 +156,7 @@ async function poll() {
     for (const e of fresh) {
       if (seenSet.has(e.alias)) continue;
       seenSet.add(e.alias);
-      s.eps[e.alias] = { ...s.eps[e.alias], ...e };
+      s.eps[e.alias] = s.eps[e.alias]?.detail ? { ...e, ...s.eps[e.alias] } : { ...s.eps[e.alias], ...e };
       if (s.done[e.alias] || s.dismissed[e.alias] || has(s.queue, e.alias)) continue;
       s.queue.push({ alias: e.alias, addedAt: Date.now() });
     }
@@ -153,7 +165,7 @@ async function poll() {
     prune(s);
     return ['eps', 'queue', 'seen', 'polledAt'];
   });
-  enrich();
+  enrich().catch(console.error);
 }
 
 // Search results lack intensity and tracklists; fetch them for episodes that
@@ -167,20 +179,29 @@ async function enrich() {
     for (;;) {
       const s = await load();
       const todo = [...new Set([s.now?.alias, ...s.queue.map((q) => q.alias), ...s.saved, ...s.history])]
-        .filter((a) => a && s.eps[a] && (!s.eps[a].detail || !s.eps[a].tracks))
+        .filter(
+          (a) =>
+            a &&
+            s.eps[a] &&
+            (!s.eps[a].detail || !s.eps[a].tracks) &&
+            (!s.eps[a].retryAt || s.eps[a].retryAt <= Date.now()),
+        )
         .slice(0, 10);
       if (!todo.length) return;
-      const got = {};
+      const got = Object.create(null);
       await Promise.all(
         todo.map(async (a) => {
           const { path, detail } = s.eps[a];
           try {
             const ep = detail ? {} : await fetchEpisode(path);
-            ep.tracks = await fetchTracks(path).catch(() => []);
+            got[a] = ep;
+            ep.tracks = await fetchTracks(path);
+            ep.retryAt = 0;
+            ep.missing = false;
             ep.artists = [...new Set(ep.tracks.map((t) => t.artist.toLowerCase()).filter(Boolean))];
             got[a] = ep;
           } catch {
-            got[a] = { detail: true, missing: true, tracks: [] }; // don't retry forever
+            got[a] = { ...got[a], retryAt: Date.now() + 30 * 60_000 }; // retry transient failures on a later poll
           }
         }),
       );
@@ -198,29 +219,59 @@ async function enrich() {
 
 // We read My NTS the same way you would: by loading the pages in a background
 // tab and reading the lists off them. No credentials are touched.
-async function sync() {
+let syncing = Promise.resolve();
+function syncSerial(fn) {
+  const run = syncing.then(fn);
+  syncing = run.catch(() => {});
+  return run;
+}
+
+function sync() {
+  return syncSerial(startSync);
+}
+
+async function startSync() {
   const { syncTab } = await chrome.storage.session.get('syncTab');
-  if (syncTab) return; // already running
+  if (syncTab && Date.now() - syncTab.startedAt < 150_000) return;
+  if (syncTab) await finishSync('Sync timed out');
+  await chrome.alarms.create('sync-timeout', { when: Date.now() + 150_000 });
   const tab = await chrome.tabs.create({ url: NTS + SYNC_PAGES[0], active: false });
   await chrome.storage.session.set({ syncTab: { id: tab.id, step: 0, startedAt: Date.now() } });
   await save({ syncError: null });
-  setTimeout(() => finishSync('Sync timed out'), 150_000);
 }
 
 async function finishSync(error) {
   const { syncTab } = await chrome.storage.session.get('syncTab');
   if (!syncTab) return;
   await chrome.storage.session.remove('syncTab');
+  await chrome.alarms.clear('sync-timeout');
   chrome.tabs.remove(syncTab.id).catch(() => {});
   if (error) await save({ syncError: error });
 }
 
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-  const { syncTab } = await chrome.storage.session.get('syncTab');
-  if (syncTab?.id === tabId) await chrome.storage.session.remove('syncTab');
+chrome.tabs.onRemoved.addListener((tabId) => {
+  syncSerial(async () => {
+    const { syncTab, playerTab } = await chrome.storage.session.get(['syncTab', 'playerTab']);
+    if (syncTab?.id === tabId) await finishSync('Sync tab was closed before it finished');
+    if (playerTab === tabId) {
+      await chrome.storage.session.remove('playerTab');
+      await mutate((s) => {
+        if (!s.now) return [];
+        s.now = { ...s.now, playing: false };
+        return ['now'];
+      });
+    }
+  }).catch(console.error);
 });
 
 async function onScraped(msg, sender) {
+  const active = (await chrome.storage.session.get('syncTab')).syncTab;
+  if (
+    active?.id === sender.tab.id &&
+    msg.kind !== 'signedOut' &&
+    msg.kind !== ['shows', 'saved', 'history'][active.step]
+  )
+    return;
   if (msg.kind === 'signedOut') {
     const { syncTab } = await chrome.storage.session.get('syncTab');
     if (syncTab?.id === sender.tab?.id) await finishSync('Sign in to nts.live to sync your hosts');
@@ -228,12 +279,14 @@ async function onScraped(msg, sender) {
   }
 
   if (msg.kind === 'shows') {
-    const prev = (await load()).follows.shows;
-    const shows = await Promise.all(
-      msg.items.map(async (it) => prev.find((p) => p.alias === it.alias) || fetchShow(it.alias).catch(() => it)),
-    );
+    const shows = [...new Map(msg.items.map((it) => [it.alias, it])).values()];
     await mutate((s) => {
-      s.follows = { shows, syncedAt: Date.now() };
+      s.follows = {
+        shows: msg.complete
+          ? shows
+          : [...new Map([...s.follows.shows, ...shows].map((show) => [show.alias, show])).values()],
+        syncedAt: msg.complete ? Date.now() : s.follows.syncedAt,
+      };
       return ['follows'];
     });
   } else if (msg.kind === 'saved' || msg.kind === 'history') {
@@ -249,11 +302,12 @@ async function onScraped(msg, sender) {
       // partial, and history, only adds.
       s[msg.kind] =
         msg.kind === 'saved' && msg.complete
-          ? aliases
-          : [...new Set([...aliases, ...s[msg.kind]])].slice(0, 300);
+          ? [...new Set(aliases)]
+          : [...new Set([...aliases, ...s[msg.kind]])];
+      if (msg.kind === 'history') s.history = s.history.slice(0, 300);
       return ['eps', msg.kind];
     });
-    enrich();
+    enrich().catch(console.error);
   }
 
   const { syncTab } = await chrome.storage.session.get('syncTab');
@@ -274,16 +328,20 @@ async function sendToTab(tabId, msg, tries = 40) {
   let injected = false;
   for (let i = 0; i < tries; i++) {
     try {
-      return await chrome.tabs.sendMessage(tabId, msg);
+      const ready = await chrome.tabs.sendMessage(tabId, { type: 'ping' });
+      if (ready?.ready !== true) throw new Error('NTS content script is outdated');
+      break;
     } catch {
       if (!injected && i >= 1) {
         injected = true;
         await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }).catch(() => {});
       }
+      if (i === tries - 1) throw new Error('NTS tab did not respond');
       await new Promise((r) => setTimeout(r, 500)); // content script not ready yet
     }
   }
-  throw new Error('NTS tab did not respond');
+  // Once delivered, never retry a non-idempotent load after a lost reply.
+  return chrome.tabs.sendMessage(tabId, msg);
 }
 
 // One NTS tab does the playing: the one last used, else whichever is audible,
@@ -291,7 +349,9 @@ async function sendToTab(tabId, msg, tries = 40) {
 async function findPlayerTab() {
   const { playerTab: lastId, syncTab } = await chrome.storage.session.get(['playerTab', 'syncTab']);
   const tabs = (await chrome.tabs.query({ url: `${NTS}/*` })).filter((t) => t.id !== syncTab?.id);
-  return tabs.find((t) => t.id === lastId) || tabs.find((t) => t.audible) || tabs.find((t) => t.pinned) || tabs[0];
+  return (
+    tabs.find((t) => t.id === lastId) || tabs.find((t) => t.audible) || tabs.find((t) => t.pinned) || tabs[0]
+  );
 }
 
 // The player tab, opening a new pinned one if there's none.
@@ -337,33 +397,53 @@ function serial(fn) {
 async function play(alias, { front, at, path } = {}) {
   const s = await load();
   let ep = s.eps[alias];
-  if (!ep && path) ep = await fetchEpisode(path).catch(() => null);
+  if (!ep?.src && (path || ep?.path)) ep = await fetchEpisode(path || ep.path).catch(() => ep);
   if (!ep?.src) throw new Error('No audio for this episode');
   const prev = s.now?.alias;
+  const commandId = crypto.randomUUID();
 
   // Update the panel straight away; loading can take a few seconds.
   await mutate((t) => {
-    t.eps[alias] ??= ep;
+    t.eps[alias] = { ...t.eps[alias], ...ep };
     if (front && prev && prev !== alias && has(t.queue, prev)) place(t, prev, topRank(t.queue));
     const q = t.queue.find((x) => x.alias === alias);
     if (q) delete q.rank;
     else if (!t.done[alias]) t.queue.push({ alias, addedAt: Date.now() });
     const p = t.progress[alias];
-    t.now = { alias, path: ep.path, playing: false, pos: at ?? p?.pos ?? 0, dur: p?.dur || 0, at: Date.now() };
+    t.now = {
+      alias,
+      commandId,
+      path: ep.path,
+      playing: false,
+      pos: at ?? (isDone(p) ? 0 : p?.pos) ?? 0,
+      dur: p?.dur || 0,
+      at: Date.now(),
+      selectedAt: Date.now(),
+    };
     return ['eps', 'queue', 'now'];
   });
 
-  const tab = await playerTab(ep);
-  const { started } = await sendToTab(tab.id, {
-    type: 'load',
-    ep: { alias, path: ep.path, src: ep.src, name: ep.name, thumb: ep.thumb, at },
-  });
-  // Chrome holds back media in a tab that has never been on screen (e.g. one
-  // restored after a restart), and may block autoplay. Showing the tab lets
-  // the former through and puts the play button in reach for the latter.
-  if (!started) await chrome.tabs.update(tab.id, { active: true });
-  else await markPlaying(alias, true);
-  return { started };
+  try {
+    const tab = await playerTab(ep);
+    const { started } = await sendToTab(tab.id, {
+      type: 'load',
+      ep: { alias, path: ep.path, src: ep.src, name: ep.name, thumb: ep.thumb, at },
+    });
+    // Chrome holds back media in a tab that has never been on screen (e.g. one
+    // restored after a restart), and may block autoplay. Showing the tab lets
+    // the former through and puts the play button in reach for the latter.
+    if (!started) await chrome.tabs.update(tab.id, { active: true });
+    else await markPlaying(alias, true);
+    return { started };
+  } catch (error) {
+    await mutate((t) => {
+      // A real playback report takes precedence over a lost command reply.
+      if (t.now?.commandId !== commandId || t.now.playbackId) return [];
+      t.now = s.now ? { ...s.now, playing: false } : null;
+      return ['now'];
+    });
+    throw error;
+  }
 }
 
 async function next() {
@@ -378,7 +458,10 @@ async function next() {
 async function skip() {
   const s = await load();
   const alias = s.now?.alias;
-  if (!orderQueue(s, buildProfile(s)).length) return { empty: true };
+  const [first] = orderQueue(s, buildProfile(s));
+  if (!first) return { empty: true };
+  // Do not dismiss the current episode if the replacement cannot be loaded.
+  const result = await play(first.alias);
   if (alias) {
     await mutate((t) => {
       const p = t.progress[alias];
@@ -388,7 +471,7 @@ async function skip() {
       return ['queue', 'done', 'dismissed'];
     });
   }
-  return next();
+  return result;
 }
 
 // Asks the player tab to play (msg.type 'resume') or seek in (msg.type
@@ -420,7 +503,10 @@ async function toggle(want) {
   if (!now?.alias) return want ? next() : null;
   if (want) return (await inPlayerTab({ type: 'resume', alias: now.alias })) || play(now.alias);
   const tab = await livePlayerTab();
-  if (tab) await sendToTab(tab.id, { type: 'pause' }, 6).catch(() => {});
+  if (tab) {
+    const result = await sendToTab(tab.id, { type: 'pause' }, 6);
+    if (!result?.paused) throw new Error('NTS could not pause playback');
+  }
   await markPlaying(now.alias, false); // nothing left that could be playing it
   return null;
 }
@@ -438,11 +524,19 @@ async function jump({ alias, path, offset }) {
 async function logTrack(n) {
   if (!n?.playing || !n.alias) return;
   await mutate((s) => {
+    if (s.now?.alias !== n.alias || s.now.playbackId !== n.playbackId) return [];
     const ep = s.eps[n.alias];
     const t = ep?.tracks && trackAt(ep.tracks, n.pos);
     const last = s.plays[0];
     if (!t || (last?.alias === n.alias && last.offset === t.offset)) return [];
-    s.plays.unshift({ alias: n.alias, path: ep.path, artist: t.artist, title: t.title, offset: t.offset, at: Date.now() });
+    s.plays.unshift({
+      alias: n.alias,
+      path: ep.path,
+      artist: t.artist,
+      title: t.title,
+      offset: t.offset,
+      at: Date.now(),
+    });
     s.plays.length = Math.min(s.plays.length, 500);
     return ['plays'];
   });
@@ -452,36 +546,81 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.now) logTrack(changes.now.newValue).catch(() => {});
 });
 
-async function onEnded(alias) {
+async function onEnded(alias, sender, playbackId) {
+  const { playerTab } = await chrome.storage.session.get('playerTab');
+  if (playerTab !== sender.tab?.id) return;
+  let accepted = false;
   const s = await mutate((t) => {
+    if (t.now?.alias !== alias || t.now.ended || t.now.playbackId !== playbackId) return [];
+    accepted = true;
+    t.now = { ...t.now, ended: true, playing: false };
     t.done[alias] = Date.now();
     t.queue = without(t.queue, alias);
-    return ['done', 'queue'];
+    return ['done', 'queue', 'now'];
   });
   // Let NTS's own "up next" carry on if our queue is empty.
-  if (s.settings.autoAdvance && s.queue.length) await serial(next);
+  if (accepted && s.settings.autoAdvance && s.queue.length) await next();
 }
 
 // The content script reports whatever NTS starts playing, including episodes
 // you started on the site yourself.
-async function onNowPlaying({ alias, path }, sender) {
-  await chrome.storage.session.set({ playerTab: sender.tab.id });
-  const s = await load();
-  let ep = s.eps[alias];
-  if (!ep && path) ep = await fetchEpisode(path).catch(() => null);
-  await mutate((t) => {
-    if (ep) t.eps[alias] = { ...t.eps[alias], ...ep };
-    if (!t.done[alias] && !has(t.queue, alias)) t.queue.push({ alias, addedAt: Date.now() });
-    return ['eps', 'queue'];
+// Claims and progress go through the worker: a second tab or a delayed save
+// must never overwrite the episode selected by a newer playback command.
+async function onNowPlaying(m, sender) {
+  const { alias, path, playbackId, startedAt } = m;
+  const parsed = parsePath(path);
+  if (!parsed || parsed.alias !== alias) throw new Error('Invalid episode path');
+  let accepted = false;
+  await mutate((s) => {
+    if (startedAt < (s.now?.selectedAt || 0)) return [];
+    accepted = true;
+    s.now = {
+      alias,
+      path: parsed.path,
+      playbackId,
+      selectedAt: startedAt,
+      playing: true,
+      pos: m.pos,
+      dur: m.dur,
+      at: Date.now(),
+    };
+    s.eps[alias] ??= { ...parsed, name: '', genres: [], moods: [], date: 0 };
+    if (!s.done[alias] && !s.dismissed[alias] && !has(s.queue, alias))
+      s.queue.push({ alias, addedAt: Date.now() });
+    return ['eps', 'queue', 'now'];
   });
-  enrich();
+  if (accepted) {
+    await chrome.storage.session.set({ playerTab: sender.tab.id });
+    enrich().catch(console.error);
+  }
+  return { accepted };
+}
+
+async function onProgress(m, sender) {
+  const { playerTab } = await chrome.storage.session.get('playerTab');
+  if (playerTab !== sender.tab.id) return;
+  await mutate((s) => {
+    if (s.now?.alias !== m.alias || s.now.playbackId !== m.playbackId || s.now.ended) return [];
+    const at = Date.now();
+    const p = { pos: m.pos, dur: m.dur, at };
+    const key = progressKey(m.alias);
+    s[key] = p;
+    s.now = { ...s.now, ...p, playing: m.playing };
+    return [key, 'now'];
+  });
 }
 
 // Adds episodes by nts.live URL. Asking for something explicitly overrides an
 // earlier dismissal or finish.
 const pathOf = (url) => {
   try {
-    return parsePath(new URL(url, NTS).pathname)?.path;
+    const parsed = new URL(url, NTS);
+    if (
+      !['https:', 'http:'].includes(parsed.protocol) ||
+      !['nts.live', 'www.nts.live'].includes(parsed.hostname)
+    )
+      return null;
+    return parsePath(parsed.pathname)?.path;
   } catch {
     return null;
   }
@@ -501,7 +640,7 @@ async function add(urls) {
     }
     return ['eps', 'queue', 'dismissed', 'done'];
   });
-  enrich();
+  enrich().catch(console.error);
   return { added: eps.length, failed: paths.length - eps.length };
 }
 
@@ -512,7 +651,7 @@ const handlers = {
   jump: (m) => serial(() => jump(m)),
   skip: () => serial(skip),
   toggle: (m) => serial(() => toggle(m.play)),
-  ended: (m) => onEnded(m.alias),
+  ended: (m, sender) => serial(() => onEnded(m.alias, sender, m.playbackId)),
   // A dead stream in the tab (its URLs expire a few hours after it loads).
   // NTS fetches a new one when its <audio> reports a network error, so report
   // one where NTS's listener can see it: in the page's own world, not the
@@ -536,9 +675,11 @@ const handlers = {
     });
     return r?.result === true;
   },
+  progress: (m, sender) => onProgress(m, sender),
   nowPlaying: (m, sender) => onNowPlaying(m, sender),
-  scraped: (m, sender) => onScraped(m, sender),
-  isSyncTab: async (_m, sender) => (await chrome.storage.session.get('syncTab')).syncTab?.id === sender.tab?.id,
+  scraped: (m, sender) => syncSerial(() => onScraped(m, sender)),
+  isSyncTab: async (_m, sender) =>
+    (await chrome.storage.session.get('syncTab')).syncTab?.id === sender.tab?.id,
   poll: () => poll(),
   sync: () => sync(),
   add: (m) => add(m.urls),
@@ -551,6 +692,9 @@ const handlers = {
   reorder: (m) =>
     mutate((s) => {
       const shown = orderQueue(s, buildProfile(s));
+      if (m.aliases.length !== shown.length || m.aliases.some((a) => !shown.some((c) => c.alias === a))) {
+        throw new Error('The queue changed. Try reordering again.');
+      }
       const q = new Map(s.queue.map((x) => [x.alias, x]));
       let last = Math.max(m.moved, m.from ?? m.moved);
       m.aliases.forEach((a, i) => q.get(a)?.rank != null && (last = Math.max(last, i)));
@@ -584,11 +728,16 @@ const handlers = {
 };
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
-  const handler = handlers[msg?.type];
+  const handler = Object.hasOwn(handlers, msg?.type) && handlers[msg.type];
   if (!handler) return false;
-  Promise.resolve(handler(msg, sender)).then(
-    (value) => reply({ ok: true, value: value ?? null }),
-    (err) => reply({ ok: false, error: String(err?.message || err) }),
-  );
+  Promise.resolve()
+    .then(() => {
+      validateMessage(msg, sender);
+      return handler(msg, sender);
+    })
+    .then(
+      (value) => reply({ ok: true, value: value ?? null }),
+      (err) => reply({ ok: false, error: String(err?.message || err) }),
+    );
   return true;
 });

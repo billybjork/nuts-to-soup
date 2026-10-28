@@ -27,17 +27,17 @@ NTS saves your position to your account only when playback stops: pause, switchi
 
 ## Keys (side panel)
 
-| | |
-|---|---|
-| `J` / `K` | move |
-| `Enter` | play |
-| `Shift` + `Enter` | play next |
-| `Alt` + `↑` / `↓` | move the focused card |
-| `X` | remove |
-| `Space` | play / pause |
-| `N` | skip to the next episode |
-| `Shift` + `N` | next track |
-| `1` `2` `3` | queue / tracks / hosts |
+|                   |                          |
+| ----------------- | ------------------------ |
+| `J` / `K`         | move                     |
+| `Enter`           | play                     |
+| `Shift` + `Enter` | play next                |
+| `Alt` + `↑` / `↓` | move the focused card    |
+| `X`               | remove                   |
+| `Space`           | play / pause             |
+| `N`               | skip to the next episode |
+| `Shift` + `N`     | next track               |
+| `1` `2` `3`       | queue / tracks / hosts   |
 
 ## Files
 
@@ -61,3 +61,54 @@ These are the parts most likely to break if NTS changes their front end:
 - `/api/v2/search/episodes`: Latest (offset caps out around 300)
 - `sndcdn.com` segment URLs with a CloudFront `Policy`: when a paused stream expires (`/api/v2/resolve-stream` starts a new one)
 - an `error` event (code 4) on the episode's `<audio>`: the only thing that makes NTS fetch a new stream for the episode it has
+
+## Development checks
+
+Use Node.js 22.13 or newer, run `npm ci`, then `npm run check`. This runs ESLint,
+Prettier's formatting check, and Node's test runner. GitHub Actions runs the same
+command on pushes and pull requests. `npm run format` applies formatting;
+`npm run test:coverage` reports imported-module coverage (the simulated content
+script and panel are executed dynamically and are not included in that report). Dependencies are development-only;
+Chrome still loads the source files directly without a build step.
+
+Tests cover ranking, API normalization, malformed storage, message validation,
+concurrent sync, stale playback reports, command failures, and content-script
+lifecycle behavior. Panel tests use jsdom to exercise rendering, keyboard
+handling, and visible errors. Browser APIs and media are simulated; these tests
+do not establish compatibility with every live NTS or media-provider change. After changing playback, reload the extension and NTS tabs and check:
+
+- Play, pause, seek and resume after reloading or discarding the player tab.
+- End an episode with auto-advance enabled and disabled; verify a single advance.
+- Sync signed in and signed out, and close the sync tab midway through.
+- Drag/reorder cards and add links while playback updates arrive.
+- Resume a SoundCloud stream after a long pause and play a Mixcloud episode.
+
+Sync deadlines use Chrome alarms so worker suspension does not lose the timeout.
+API requests time out after 20 seconds; failed metadata enrichment becomes
+eligible for retry after 30 minutes instead of permanently caching a failure.
+
+### State and failure handling
+
+The service worker owns writes to extension storage. Content scripts claim a
+playback session and attach its identity to progress and end reports. Reports
+from an old tab, an old playback session, or an episode superseded by a panel
+command cannot overwrite the selected episode. Worker mutations and playback
+commands each run serially; sync has its own serial queue so network and tab
+navigation do not hold up progress saves.
+
+Read-time normalization handles missing legacy fields and malformed records
+without rewriting the entire store. Existing inbox/pin migrations remain in
+place. Metadata can be fetched again; queue entries, listening progress and
+preferences are not automatically expired. Track history is limited to 500
+entries and poll deduplication to 3,000 IDs. Large queues and per-episode progress
+can still grow over time; no destructive retention policy is applied.
+
+A partially scraped follows or saved list merges with the existing list. Only a
+complete scrape replaces it. Completeness is inferred from a stable list count,
+so slow or changed NTS pagination remains a site-dependent limitation. Empty
+follows/saved results are treated as partial to avoid erasing preferences when a
+page fails to load; clearing the last follow/save on NTS is therefore not yet
+reflected automatically.
+
+After updating this version, reload the extension and open NTS tabs together:
+older injected scripts use the previous progress-writing protocol.

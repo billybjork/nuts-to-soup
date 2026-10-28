@@ -20,6 +20,24 @@
   const me = String(Math.random());
   root.dataset.ntsq = me;
   const superseded = () => root.dataset.ntsq !== me;
+  const lifecycle = new AbortController();
+  const timers = new Set();
+  const listen = (target, type, fn, options = {}) =>
+    target.addEventListener(type, fn, {
+      ...(typeof options === 'boolean' ? { capture: options } : options),
+      signal: lifecycle.signal,
+    });
+  const repeat = (fn, ms) => timers.add(setInterval(fn, ms));
+  let resources;
+  const retirement = new MutationObserver(() => {
+    if (!superseded()) return;
+    lifecycle.abort();
+    timers.forEach(clearInterval);
+    resources?.disconnect();
+    retirement.disconnect();
+    chrome.runtime.onMessage.removeListener(onCommand);
+  });
+  retirement.observe(root, { attributes: true, attributeFilter: ['data-ntsq'] });
 
   let current = null; // {alias, startedAt, lastSave, floor, target, seekedAt, attempts}
   let pending = null; // {alias, at}: what we last asked NTS to load
@@ -67,8 +85,8 @@
     );
   }
 
-  window.addEventListener('message', (e) => {
-    if (e.origin !== MIXCLOUD_ORIGIN) return;
+  listen(window, 'message', (e) => {
+    if (superseded() || e.origin !== MIXCLOUD_ORIGIN || e.source !== mixcloudFrame()?.contentWindow) return;
     let m;
     try {
       m = JSON.parse(e.data);
@@ -78,11 +96,18 @@
     if (m?.mixcloud !== 'playerWidget' || m.type !== 'event') return;
     const { eventName, args = [] } = m.data || {};
     if (eventName === 'progress') {
-      const pos = args[0] || 0;
+      const pos = args[0];
+      if (!Number.isFinite(pos) || pos < 0) return;
       // Progress that moves means playing, even if we missed the play event,
       // unless it's a straggler from just before a pause.
       const moved = mixcloud.at > 0 && pos > mixcloud.pos && Date.now() - (mixcloud.pausedAt || 0) > 1500;
-      mixcloud = { ...mixcloud, pos, dur: args[1] || mixcloud.dur, playing: mixcloud.playing || moved, at: Date.now() };
+      mixcloud = {
+        ...mixcloud,
+        pos,
+        dur: Number.isFinite(args[1]) && args[1] > 0 ? args[1] : mixcloud.dur,
+        playing: mixcloud.playing || moved,
+        at: Date.now(),
+      };
     } else if (eventName === 'play') {
       mixcloud.playing = true;
     } else if (eventName === 'pause') {
@@ -101,18 +126,27 @@
   let lastSeen = { alias: null, pos: -1, movedAt: 0 };
   function advancing(ae) {
     const now = Date.now();
-    if (ae.episodeAlias !== lastSeen.alias) lastSeen = { alias: ae.episodeAlias, pos: ae.currentPositionS, movedAt: 0 };
-    else if (ae.currentPositionS > lastSeen.pos) lastSeen = { ...lastSeen, pos: ae.currentPositionS, movedAt: now };
+    if (ae.episodeAlias !== lastSeen.alias)
+      lastSeen = { alias: ae.episodeAlias, pos: ae.currentPositionS, movedAt: 0 };
+    else if (ae.currentPositionS !== lastSeen.pos)
+      lastSeen = {
+        ...lastSeen,
+        pos: ae.currentPositionS,
+        movedAt: ae.currentPositionS > lastSeen.pos ? now : 0,
+      };
     return now - lastSeen.movedAt < 2500;
   }
 
   // The <audio> NTS is playing the archive through: the one whose position
   // agrees with activeEpisode (the live radio has its own element).
   function audioFor(ae) {
-    const els = [...document.querySelectorAll('audio')].filter((a) => a.src);
+    const els = [...document.querySelectorAll('audio')].filter(
+      (a) => a.src && Number.isFinite(a.duration) && a.duration > 0,
+    );
     if (!els.length) return null;
     return els.reduce((best, a) =>
-      Math.abs(a.currentTime - (ae.currentPositionS || 0)) < Math.abs(best.currentTime - (ae.currentPositionS || 0))
+      Math.abs(a.currentTime - (ae.currentPositionS || 0)) <
+      Math.abs(best.currentTime - (ae.currentPositionS || 0))
         ? a
         : best,
     );
@@ -170,7 +204,8 @@
   }
 
   try {
-    new PerformanceObserver((list) => list.getEntries().forEach((e) => noteResource(e.name))).observe({
+    resources = new PerformanceObserver((list) => list.getEntries().forEach((e) => noteResource(e.name)));
+    resources.observe({
       type: 'resource',
       buffered: true,
     });
@@ -183,18 +218,27 @@
   let refreshing = null;
   function refresh(el, pos = el.currentTime) {
     return (refreshing ??= (async () => {
+      const owner = current;
       const src = el.src;
       const muted = el.muted;
-      if (current) Object.assign(current, { target: pos, seekedAt: Date.now(), startedAt: Date.now(), attempts: 0, floor: 0 });
+      if (current)
+        Object.assign(current, {
+          target: pos,
+          seekedAt: Date.now(),
+          startedAt: Date.now(),
+          attempts: 0,
+          floor: 0,
+        });
       el.muted = true;
       try {
         const index = [...document.querySelectorAll('audio')].indexOf(el);
         if ((await send({ type: 'refreshStream', index }))?.value !== true) return false;
         const end = Date.now() + 10000;
         while (el.src === src || el.readyState < 1) {
-          if (Date.now() >= end) return false;
+          if (superseded() || current !== owner || Date.now() >= end) return false;
           await sleep(100);
         }
+        if (superseded() || current !== owner) return false;
         if (current) Object.assign(current, { seekedAt: Date.now(), startedAt: Date.now() });
         el.currentTime = pos;
         return true;
@@ -221,12 +265,13 @@
     if (Date.now() - refreshedAt < REFRESH_GAP_MS) return;
     refreshedAt = Date.now();
     stuck = { el: null, pos: -1, since: 0 };
-    refresh(el);
+    refresh(el).catch(() => {});
   }
 
   // Interval timers in a silent background tab can be held back for a minute;
   // a timer started from an event isn't.
-  document.addEventListener(
+  listen(
+    document,
     'waiting',
     (e) => {
       if (!(e.target instanceof HTMLAudioElement)) return;
@@ -250,11 +295,13 @@
 
     // activeEpisode lags a switch by a second or so; until it catches up its
     // position won't match the player's, and we skip rather than misattribute.
-    let alias = ae.episodeAlias;
-    if (!alias || Math.abs((ae.currentPositionS || 0) - p.pos) > 15) {
-      alias = pending && Date.now() - pending.at < 60000 ? pending.alias : null;
-    }
-    if (!alias) return;
+    const alias = ae.episodeAlias;
+    if (!alias || Math.abs((ae.currentPositionS || 0) - p.pos) > 15) return;
+    if (pending && Date.now() - pending.at < 60000 && alias !== pending.alias) return;
+    // The footer and activeEpisode can update independently during a switch.
+    // Wait for agreement rather than crediting old audio to the new episode.
+    if (footerPath()?.split('/')[4] !== alias) return;
+    if (pending?.alias === alias) pending = null;
 
     if (!p.playing) {
       if (wasPlaying && current?.alias === alias) persist(alias, p, false);
@@ -265,14 +312,29 @@
 
     if (current?.alias !== alias) {
       if (Date.now() < quietUntil && alias !== pending?.alias) return;
-      current = { alias, startedAt: Date.now(), lastSave: Date.now(), floor: 0, attempts: 0 };
-      send({ type: 'nowPlaying', alias, path: footerPath() });
+      current = {
+        alias,
+        playbackId: crypto.randomUUID(),
+        startedAt: Date.now(),
+        lastSave: 0,
+        floor: 0,
+        attempts: 0,
+      };
+      send({
+        type: 'nowPlaying',
+        alias,
+        path: footerPath(),
+        playbackId: current.playbackId,
+        startedAt: current.startedAt,
+        pos: p.pos,
+        dur: p.dur,
+      });
       if (seekTo?.alias === alias) {
         Object.assign(current, { target: seekTo.t, seekedAt: Date.now(), attempts: 1 });
         seekTo = null;
         p.seek(current.target);
       } else {
-        resume(alias, p);
+        resume(alias, p).catch(() => {});
       }
       return;
     }
@@ -305,49 +367,48 @@
   }
 
   async function resume(alias, p) {
+    const owner = current;
     const key = `p:${alias}`;
     const saved = (await chrome.storage.local.get(key))[key];
-    if (!saved || current?.alias !== alias) return;
+    if (superseded() || !saved || current !== owner || current?.alias !== alias) return;
     if (saved.pos < p.pos + RESUME_MIN_GAP_S) return;
-    if (saved.dur && saved.pos > saved.dur - 30) return; // finished; start over
+    if (saved.dur > 0 && saved.pos >= Math.max(saved.dur * 0.9, saved.dur - 60)) return; // finished; start over
     current.floor = saved.pos;
     current.attempts = 1;
     p.seek(saved.pos);
   }
 
   function persist(alias, p, playing) {
-    if (!current || current.alias !== alias) return;
+    if (superseded() || !current || current.alias !== alias) return;
     current.lastSave = Date.now();
-    const at = Date.now();
     const pos = Math.floor(p.pos);
     const dur = Math.floor(p.dur || 0);
-    try {
-      chrome.storage.local.set({
-        [`p:${alias}`]: { pos, dur, at },
-        now: { alias, path: footerPath(), playing, pos, dur, at },
-      });
-    } catch {
-      // orphaned after an extension reload
-    }
+    send({ type: 'progress', alias, playbackId: current.playbackId, playing, pos, dur });
   }
 
   function ended() {
-    if (!current) return;
-    const { alias } = current;
+    if (superseded() || !current) return;
+    const { alias, playbackId } = current;
     const ae = activeEpisode();
     const p = player(ae);
     if (p) persist(alias, { pos: p.dur || p.pos, dur: p.dur }, false);
     current = null;
     pending = null;
     quietUntil = Date.now() + QUIET_AFTER_END_MS;
-    send({ type: 'ended', alias });
+    send({ type: 'ended', alias, playbackId });
   }
 
-  setInterval(tick, TICK_MS);
-  document.addEventListener('pause', (e) => e.target instanceof HTMLAudioElement && tick(), true);
-  document.addEventListener('ended', (e) => e.target instanceof HTMLAudioElement && current && ended(), true);
+  repeat(tick, TICK_MS);
+  listen(document, 'pause', (e) => e.target instanceof HTMLAudioElement && tick(), true);
+  listen(
+    document,
+    'ended',
+    (e) =>
+      e.target instanceof HTMLAudioElement && e.target === player(activeEpisode())?.el && current && ended(),
+    true,
+  );
   // Last chance to save before the tab closes, reloads or is discarded.
-  window.addEventListener('pagehide', () => {
+  listen(window, 'pagehide', () => {
     const ae = activeEpisode();
     const p = player(ae);
     if (current && p) persist(current.alias, p, false);
@@ -372,6 +433,7 @@
     for (const [k, v] of Object.entries(data)) b.setAttribute(`data-${k}`, v);
     document.body.append(b);
     const before = activeEpisode();
+    current = null;
     pending = { alias: ep.alias, at: Date.now() };
     seekTo = ep.at != null ? { alias: ep.alias, t: ep.at } : null;
     quietUntil = 0;
@@ -388,6 +450,7 @@
     const start = Date.now();
     while (Date.now() - start < 8000) {
       await new Promise((r) => setTimeout(r, 500));
+      if (superseded()) return false;
       const ae = activeEpisode();
       if (ae.episodeAlias !== alias) continue;
       if (before.episodeAlias !== alias || ae.currentPositionS !== before.currentPositionS) return true;
@@ -407,6 +470,7 @@
   async function settle(want, ms) {
     const end = Date.now() + ms;
     for (;;) {
+      if (superseded()) return false;
       if (player(activeEpisode())?.playing === want) return true;
       if (Date.now() >= end) return false;
       await sleep(250);
@@ -422,6 +486,7 @@
     if (p.playing === want) return true;
     footer()?.querySelector('[class*="player__play-button"]')?.click();
     if (await settle(want, 2500)) return true;
+    if (superseded()) return false;
     if (mixcloudFrame()) mixcloudCall(want ? 'play' : 'pause');
     else if (p.el) want ? p.el.play().catch(() => {}) : p.el.pause();
     return settle(want, 2500);
@@ -445,13 +510,18 @@
   // Jump within the episode that's loaded, starting playback if it's paused.
   async function jumpTo(alias, t) {
     const p = await playable(alias, t);
-    if (!p) return 'missing';
-    if (current) Object.assign(current, { floor: 0, target: null });
+    if (!p || superseded()) return 'missing';
+    seekTo = { alias, t };
+    if (current?.alias === alias) {
+      Object.assign(current, { floor: 0, target: null });
+      seekTo = null;
+    }
     p.seek(t);
     return (await setPlaying(true)) ? 'playing' : 'blocked';
   }
 
   const commands = {
+    ping: async () => ({ ready: true }),
     load: async (m) => ({ started: await load(m.ep) }),
     resume: async (m) => ({ state: await playLoaded(m.alias) }),
     seek: async (m) => ({ state: await jumpTo(m.alias, m.t) }),
@@ -459,11 +529,12 @@
     pause: async () => ({ paused: await setPlaying(false) }),
   };
 
-  chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
-    if (superseded() || !commands[msg?.type]) return false;
+  function onCommand(msg, _sender, reply) {
+    if (superseded() || !Object.hasOwn(commands, msg?.type)) return false;
     commands[msg.type](msg).then(reply, () => reply({}));
     return true;
-  });
+  }
+  chrome.runtime.onMessage.addListener(onCommand);
 
   // --- My NTS -------------------------------------------------------------------
 
@@ -508,7 +579,7 @@
     let complete = false;
     while (Date.now() - start < 40000) {
       await new Promise((r) => setTimeout(r, 1200));
-      if (location.pathname.replace(/\/$/, '') !== path) return;
+      if (superseded() || location.pathname.replace(/\/$/, '') !== path) return;
       const n = readList(kind).length;
       if (kind === 'history' && n >= HISTORY_LIMIT) break;
       stable = n === last ? stable + 1 : 0;
@@ -520,18 +591,18 @@
       if (deep) window.scrollTo(0, document.body.scrollHeight);
     }
     if (deep) window.scrollTo(0, 0);
-    const items = readList(kind).slice(0, HISTORY_LIMIT);
+    const items = kind === 'history' ? readList(kind).slice(0, HISTORY_LIMIT) : readList(kind);
     // An empty follows or saved list is far more likely a page that failed to
     // load than a real one, and would wipe what we have.
-    if (!items.length && kind !== 'history') return;
+    if (!items.length && kind !== 'history') complete = false;
     send({ type: 'scraped', kind, items, complete });
   }
 
   // NTS is a single-page app, so watch for client-side navigation too.
   let lastPath = null;
-  setInterval(() => {
-    if (location.pathname === lastPath) return;
+  repeat(() => {
+    if (superseded() || location.pathname === lastPath) return;
     lastPath = location.pathname;
-    scrape();
+    scrape().catch(() => {});
   }, 1000);
 })();

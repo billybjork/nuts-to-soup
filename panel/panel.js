@@ -29,7 +29,10 @@ try {
 const $ = (sel) => document.querySelector(sel);
 
 const esc = (s) =>
-  String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  String(s ?? '').replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+  );
 
 const fmtDate = (ts) =>
   ts ? new Date(ts).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
@@ -61,9 +64,15 @@ function toast(text) {
 }
 
 async function send(msg) {
-  const r = await chrome.runtime.sendMessage(msg);
-  if (r && !r.ok) toast(r.error);
-  return r;
+  try {
+    const r = await chrome.runtime.sendMessage(msg);
+    if (!r) throw new Error('The extension did not respond. Reload the panel.');
+    if (!r.ok) toast(r.error);
+    return r;
+  } catch (error) {
+    toast(error.message || 'The extension is unavailable. Reload the panel.');
+    return { ok: false, error: String(error) };
+  }
 }
 
 // "Playing" not refreshed for a minute means the tab went away mid-play.
@@ -74,7 +83,8 @@ function livePosition() {
   const n = state.now;
   if (!n?.alias) return 0;
   const from = seek?.alias === n.alias && seek.at > n.at ? seek : n;
-  return (from.pos || 0) + (isPlaying(n) ? (Date.now() - from.at) / 1000 : 0);
+  const pos = (from.pos || 0) + (isPlaying(n) ? Math.max(0, Date.now() - from.at) / 1000 : 0);
+  return n.dur > 0 ? Math.min(n.dur, pos) : pos;
 }
 
 const trackName = (t) => [t.artist, t.title].filter(Boolean).join(' — ');
@@ -108,10 +118,16 @@ function flip(update, animate = true) {
     const from = byKey.get(el.dataset.key) || byEp.get(el.dataset.ep);
     const to = el.getBoundingClientRect();
     if (!from) {
-      el.animate([{ opacity: 0, transform: 'translateY(-6px)' }, { opacity: 1, transform: 'none' }], {
-        duration: 220,
-        easing: 'ease-out',
-      });
+      el.animate(
+        [
+          { opacity: 0, transform: 'translateY(-6px)' },
+          { opacity: 1, transform: 'none' },
+        ],
+        {
+          duration: 220,
+          easing: 'ease-out',
+        },
+      );
       continue;
     }
     const dx = from.left - to.left;
@@ -119,7 +135,10 @@ function flip(update, animate = true) {
     if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
     const offscreen = (r) => r.bottom < 0 || r.top > innerHeight;
     if (offscreen(from) && offscreen(to)) continue;
-    el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], { duration: 280, easing: EASE });
+    el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], {
+      duration: 280,
+      easing: EASE,
+    });
   }
 }
 
@@ -128,11 +147,17 @@ function flip(update, animate = true) {
 function leave(el, dx = 40) {
   if (!el || still.matches) return Promise.resolve();
   return el
-    .animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: `translateX(${dx}px)` }], {
-      duration: 160,
-      easing: 'ease-in',
-      fill: 'forwards',
-    })
+    .animate(
+      [
+        { opacity: 1, transform: 'none' },
+        { opacity: 0, transform: `translateX(${dx}px)` },
+      ],
+      {
+        duration: 160,
+        easing: 'ease-in',
+        fill: 'forwards',
+      },
+    )
     .finished.catch(() => {});
 }
 const back = (el) => el?.getAnimations().forEach((a) => a.cancel());
@@ -270,8 +295,14 @@ function renderQueue(prof) {
   const items = orderQueue(state, prof);
   rows = items.map((c) => c.alias);
   cards = new Map(items.map((c) => [c.key, c]));
-  if (items.length) patch($('#list'), items.map((c) => ({ key: c.key, html: card(c) })));
-  else $('#list').innerHTML = '<div class="empty">Nothing queued. New episodes show up here as NTS adds them.</div>';
+  if (items.length)
+    patch(
+      $('#list'),
+      items.map((c) => ({ key: c.key, html: card(c) })),
+    );
+  else
+    $('#list').innerHTML =
+      '<div class="empty">Nothing queued. New episodes show up here as NTS adds them.</div>';
   $('#foot').innerHTML = `
     <form class="add" data-form="add">
       <input name="urls" placeholder="Paste NTS episode links to add" autocomplete="off" />
@@ -316,13 +347,14 @@ function renderTracks() {
   $('#list').innerHTML = plays.length
     ? html.join('')
     : '<div class="empty">Tracks show up here as they play. Click one to jump back to it.</div>';
-  $('#foot').innerHTML = `<div class="keys">Tracks come from NTS's tracklists, so episodes without one aren't listed.</div>`;
+  $('#foot').innerHTML =
+    `<div class="keys">Tracks come from NTS's tracklists, so episodes without one aren't listed.</div>`;
 }
 
 function renderHosts(prof) {
   rows = [];
   const shows = [...state.follows.shows].sort((a, b) => a.name.localeCompare(b.name));
-  const lastEp = {};
+  const lastEp = Object.create(null);
   for (const ep of Object.values(state.eps)) {
     if (ep.date > (lastEp[ep.show] || 0)) lastEp[ep.show] = ep.date;
   }
@@ -370,6 +402,7 @@ function render() {
   $('#count-queue').textContent = queued || '';
   const input = $('.add input');
   const typed = input?.value;
+  const selection = input && [input.selectionStart, input.selectionEnd];
   const hadFocus = input && document.activeElement === input;
   flip(() => {
     renderNow();
@@ -379,15 +412,26 @@ function render() {
   }, animate);
   const again = $('.add input');
   if (again && typed) again.value = typed;
-  if (again && hadFocus) again.focus();
+  if (again && hadFocus) {
+    again.focus();
+    again.setSelectionRange(...selection);
+  }
   focus = Math.min(focus, Math.max(0, rows.length - 1));
   showFocus();
   document.querySelectorAll('.tags.line').forEach(fadeChips);
 }
 
+let refreshVersion = 0;
 async function refresh() {
-  state = await load();
-  render();
+  const version = ++refreshVersion;
+  try {
+    const next = await load();
+    if (version !== refreshVersion) return;
+    state = next;
+    if (!sorting) render();
+  } catch (error) {
+    toast(`Could not load the queue: ${error.message}`);
+  }
 }
 
 // --- interaction ---------------------------------------------------------------
@@ -423,7 +467,8 @@ function shownEl(alias) {
 }
 
 async function act(name, el) {
-  if (name === 'autoAdvance') return send({ type: 'settings', settings: { autoAdvance: !state.settings.autoAdvance } });
+  if (name === 'autoAdvance')
+    return send({ type: 'settings', settings: { autoAdvance: !state.settings.autoAdvance } });
   if (name === 'menu') return toggleMenu(el);
   if (name === 'expand') return toggleStack(el.closest('.card').dataset.key);
   if (name === 'nextTrack') return nextTrack();
@@ -444,6 +489,7 @@ async function act(name, el) {
     leaving = shownEl(alias);
   } else if (name === 'removeStack') {
     const c = cards.get(key);
+    if (!c) return;
     msg = { type: 'remove', aliases: [c.alias, ...c.stack.map((s) => s.alias)] };
     leaving = shownEl(c.alias)?.closest('.card');
   } else if (name === 'skip' && state?.now?.alias) {
@@ -461,8 +507,13 @@ async function run(msg, leaving) {
   const r = await send(msg);
   clearTimeout(slow);
   if (!r?.ok || r.value?.empty) back(leaving);
+  if (!r?.ok) {
+    seek = null;
+    tickNow();
+  }
   if (r?.value?.empty) toast('Queue is empty');
-  else if (r?.value?.started === false) toast("Switched to the NTS tab. Press play there if it hasn't started");
+  else if (r?.value?.started === false)
+    toast("Switched to the NTS tab. Press play there if it hasn't started");
   else if (r?.ok && starting) $('#toast').hidden = true;
   return r;
 }
@@ -513,10 +564,16 @@ function toggleMenu(btn) {
   menu.style.top = `${below ? b.bottom + 4 : b.top - 4 - m.height}px`;
   menu.style.left = `${Math.max(8, b.right - m.width)}px`;
   if (!still.matches) {
-    menu.animate([{ opacity: 0, transform: `translateY(${below ? -4 : 4}px)` }, { opacity: 1, transform: 'none' }], {
-      duration: 120,
-      easing: 'ease-out',
-    });
+    menu.animate(
+      [
+        { opacity: 0, transform: `translateY(${below ? -4 : 4}px)` },
+        { opacity: 1, transform: 'none' },
+      ],
+      {
+        duration: 120,
+        easing: 'ease-out',
+      },
+    );
   }
 }
 
@@ -575,8 +632,8 @@ function startSort(e, cardEl) {
       if (j === from) return;
       const m = box[j].top + box[j].h / 2;
       let shift = 0;
-      if (j > from && m < mid) (shift = -box[from].h), to++;
-      else if (j < from && m > mid) (shift = box[from].h), to--;
+      if (j > from && m < mid) ((shift = -box[from].h), to++);
+      else if (j < from && m > mid) ((shift = box[from].h), to--);
       el.style.transform = shift ? `translateY(${shift}px)` : '';
     });
     cardEl.style.transform = `translateY(${top - box[from].top}px)`;
@@ -607,6 +664,7 @@ function startSort(e, cardEl) {
     grip.removeEventListener('pointermove', move);
     grip.removeEventListener('pointerup', up);
     grip.removeEventListener('pointercancel', cancel);
+    grip.removeEventListener('lostpointercapture', cancel);
     document.removeEventListener('keydown', onKey);
     if (!active) return;
     document.body.classList.remove('sorting');
@@ -618,6 +676,7 @@ function startSort(e, cardEl) {
       if (moved) list.insertBefore(cardEl, to > from ? els[to].nextSibling : els[to]);
     });
     setTimeout(() => cardEl.classList.remove('dragging'), 280);
+    if (!moved) refresh();
     if (moved) {
       const order = [...rows];
       order.splice(to, 0, ...order.splice(from, 1));
@@ -632,6 +691,7 @@ function startSort(e, cardEl) {
   grip.addEventListener('pointermove', move);
   grip.addEventListener('pointerup', up);
   grip.addEventListener('pointercancel', cancel);
+  grip.addEventListener('lostpointercapture', cancel);
   document.addEventListener('keydown', onKey);
 }
 
@@ -705,7 +765,14 @@ document.addEventListener('drop', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.metaKey || e.ctrlKey || e.target.matches('input, textarea') || sorting) return;
+  if (
+    e.metaKey ||
+    e.ctrlKey ||
+    e.target.closest('input, textarea, select, [contenteditable=true]') ||
+    sorting
+  )
+    return;
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('button, a')) return;
   const key = e.key.toLowerCase();
   if (e.altKey && view === 'queue' && (key === 'arrowup' || key === 'arrowdown')) {
     const to = focus + (key === 'arrowup' ? -1 : 1);
@@ -761,7 +828,16 @@ chrome.storage.onChanged.addListener((changes, area) => {
     const keys = changed;
     changed = new Set();
     const prev = state?.now?.alias;
-    state = await load();
+    const version = ++refreshVersion;
+    let next;
+    try {
+      next = await load();
+    } catch (error) {
+      toast(error.message);
+      return;
+    }
+    if (version !== refreshVersion) return;
+    state = next;
     if (sorting) return;
     const ticksOnly = [...keys].every((k) => k === 'now' || k.startsWith('p:'));
     if (ticksOnly && view !== 'tracks' && state.now?.alias === prev) renderNow();
@@ -769,6 +845,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }, 100);
 });
 
-setInterval(() => isPlaying(state?.now) && tickNow(), 1000);
+setInterval(() => {
+  if (!state?.now) return;
+  if (state.now.playing && !isPlaying(state.now)) renderNow();
+  else if (isPlaying(state.now)) tickNow();
+}, 1000);
 
 refresh();
