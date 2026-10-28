@@ -1,6 +1,21 @@
-import { load, isDone } from '../lib/store.js';
-import { NTS, trackAt } from '../lib/nts.js';
-import { buildProfile, orderQueue, topGenres } from '../lib/rank.js';
+import { load } from '../lib/store.js';
+import { NTS } from '../lib/nts.js';
+import { buildProfile } from '../lib/rank.js';
+import {
+  fmtDate,
+  fmtTime,
+  ago,
+  isPlaying,
+  livePosition,
+  trackName,
+  trackAfter,
+  nowView,
+  queueCards,
+  queuedCount,
+  cardInfo,
+  tracksView,
+  hostsView,
+} from '../lib/view.js';
 
 const ICONS = {
   play: '<svg viewBox="0 0 16 16"><path d="M4 2l10 6-10 6z"/></svg>',
@@ -34,26 +49,6 @@ const esc = (s) =>
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
   );
 
-const fmtDate = (ts) =>
-  ts ? new Date(ts).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
-
-function fmtTime(s) {
-  s = Math.max(0, Math.floor(s));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const pad = (n) => String(n).padStart(2, '0');
-  return h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
-}
-
-function ago(ts) {
-  if (!ts) return 'never';
-  const m = Math.round((Date.now() - ts) / 60000);
-  if (m < 1) return 'just now';
-  if (m < 60) return `${m} min ago`;
-  const h = Math.round(m / 60);
-  return h < 48 ? `${h}h ago` : `${Math.round(h / 24)}d ago`;
-}
-
 let toastTimer;
 function toast(text) {
   const el = $('#toast');
@@ -74,24 +69,6 @@ async function send(msg) {
     return { ok: false, error: String(error) };
   }
 }
-
-// "Playing" not refreshed for a minute means the tab went away mid-play.
-const isPlaying = (n) => !!n?.playing && Date.now() - n.at < 60000;
-
-// Position now, extrapolated between the content script's 5-second saves.
-function livePosition() {
-  const n = state.now;
-  if (!n?.alias) return 0;
-  const from = seek?.alias === n.alias && seek.at > n.at ? seek : n;
-  const pos = (from.pos || 0) + (isPlaying(n) ? Math.max(0, Date.now() - from.at) / 1000 : 0);
-  return n.dur > 0 ? Math.min(n.dur, pos) : pos;
-}
-
-const trackName = (t) => [t.artist, t.title].filter(Boolean).join(' — ');
-
-// The first listed track starting after `pos`, give or take a moment for
-// tracks just jumped to.
-const trackAfter = (ep, pos) => ep?.tracks?.find((t) => t.offset > pos + 2);
 
 // --- animation -------------------------------------------------------------------
 
@@ -224,26 +201,19 @@ function renderNow() {
 }
 
 function tickNow() {
-  const n = state?.now;
-  const ep = n?.alias && state.eps[n.alias];
-  if (!ep) return;
-  const dur = state.progress[n.alias]?.dur || n.dur || 0;
-  const pos = livePosition();
+  const v = state && nowView(state, seek);
+  if (!v) return;
+  const { pos, dur } = v;
   const live = (k) => $(`#now [data-live="${k}"]`) || {};
-  const t = ep.tracks && trackAt(ep.tracks, pos);
   live('time').textContent = `${fmtTime(pos)}${dur ? ` / ${fmtTime(dur)}` : ''}`;
-  live('track').textContent = t ? trackName(t) : '';
-  live('next').disabled = !trackAfter(ep, pos);
+  live('track').textContent = v.track ? trackName(v.track) : '';
+  live('next').disabled = !v.next;
   if (live('bar').style) live('bar').style.width = `${dur ? Math.min(100, (pos / dur) * 100) : 0}%`;
 }
 
 function card(c) {
   const { ep, stack } = c;
-  const p = state.progress[ep.alias];
-  const pct = p?.dur ? Math.min(100, (p.pos / p.dur) * 100) : 0;
-  const notes = [fmtDate(ep.date)];
-  if (pct && !isDone(p) && p.pos > 60) notes.push(`Resume ${fmtTime(p.pos)}`);
-  notes.push(...(c.why || []), ep.location);
+  const { pct, notes } = cardInfo(state, c);
   const expanded = stack.length && open.has(c.key);
   // The next two in the stack peek out from behind the cover.
   const under = stack
@@ -267,7 +237,7 @@ function card(c) {
         </div>
         <div class="body">
           <a class="title" href="${NTS}${esc(ep.path)}" target="_blank">${esc(ep.name || ep.alias)}</a>
-          <div class="meta">${esc(notes.filter(Boolean).join(' · '))}</div>
+          <div class="meta">${esc(notes.join(' · '))}</div>
           <div class="tags line">${ep.genres.map((g) => `<span class="tag">${esc(g)}</span>`).join('')}</div>
         </div>
         <div class="actions">
@@ -292,7 +262,7 @@ const sub = ({ ep }) => `
   </div>`;
 
 function renderQueue(prof) {
-  const items = orderQueue(state, prof);
+  const items = queueCards(state, prof);
   rows = items.map((c) => c.alias);
   cards = new Map(items.map((c) => [c.key, c]));
   if (items.length)
@@ -318,22 +288,12 @@ function renderQueue(prof) {
     <div class="keys">A show's episodes stack on one card and play newest first, one per turn. After you hear one, that show waits for three others. Drag a card by its grip to reorder. To add an episode, drag or paste its link here, or right-click it on nts.live.</div>`;
 }
 
-const dayLabel = (ts) => {
-  const days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(ts).setHours(0, 0, 0, 0)) / 864e5);
-  if (days <= 0) return 'Today';
-  if (days === 1) return 'Yesterday';
-  return fmtDate(ts);
-};
-
 function renderTracks() {
   rows = [];
-  const n = state.now;
-  const plays = state.plays;
-  let day = '';
-  const html = plays.map((t, i) => {
-    const ep = state.eps[t.alias];
-    const live = i === 0 && isPlaying(n) && n.alias === t.alias;
-    const head = dayLabel(t.at) !== day ? `<div class="section">${esc((day = dayLabel(t.at)))}</div>` : '';
+  const plays = tracksView(state);
+  const html = plays.map((t) => {
+    const { ep, live } = t;
+    const head = t.day ? `<div class="section">${esc(t.day)}</div>` : '';
     return `${head}
       <button class="track${live ? ' live' : ''}" data-act="jump" data-alias="${esc(t.alias)}" data-path="${esc(t.path)}" data-offset="${t.offset}" title="Jump to the start of this track">
         <img src="${esc(ep?.thumb || ep?.image || '')}" alt="" loading="lazy" />
@@ -353,12 +313,7 @@ function renderTracks() {
 
 function renderHosts(prof) {
   rows = [];
-  const shows = [...state.follows.shows].sort((a, b) => a.name.localeCompare(b.name));
-  const lastEp = Object.create(null);
-  for (const ep of Object.values(state.eps)) {
-    if (ep.date > (lastEp[ep.show] || 0)) lastEp[ep.show] = ep.date;
-  }
-  const genres = topGenres(prof);
+  const { shows, genres } = hostsView(state, prof);
   $('#list').innerHTML = `
     <div class="section">Following (${shows.length})</div>
     ${
@@ -367,7 +322,7 @@ function renderHosts(prof) {
             .map(
               (s) => `<div class="host">
                 <a href="${NTS}/shows/${esc(s.alias)}" target="_blank">${esc(s.name)}</a>
-                <span>${lastEp[s.alias] ? fmtDate(lastEp[s.alias]) : ''}</span>
+                <span>${s.last ? fmtDate(s.last) : ''}</span>
               </div>`,
             )
             .join('')
@@ -376,7 +331,7 @@ function renderHosts(prof) {
     <div class="section">Your sound</div>
     <div class="genres tags">${
       genres.length
-        ? genres.map(([g]) => `<span class="tag">${esc(g)}</span>`).join('')
+        ? genres.map((g) => `<span class="tag">${esc(g)}</span>`).join('')
         : '<span class="meta">Builds up as you save, finish and queue episodes.</span>'
     }</div>`;
   $('#foot').innerHTML = `
@@ -398,7 +353,7 @@ function render() {
   const animate = shown === view;
   shown = view;
   document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
-  const queued = state.queue.filter((q) => q.alias !== state.now?.alias).length;
+  const queued = queuedCount(state);
   $('#count-queue').textContent = queued || '';
   const input = $('.add input');
   const typed = input?.value;
@@ -524,7 +479,7 @@ function nextTrack() {
   const ep = n?.alias && state.eps[n.alias];
   if (!ep) return;
   if (!ep.tracks?.length) return toast('No tracklist for this episode');
-  const t = trackAfter(ep, livePosition());
+  const t = trackAfter(ep, livePosition(state, seek));
   if (!t) return toast("That's the last listed track");
   seek = { alias: n.alias, pos: t.offset, at: Date.now() };
   tickNow();

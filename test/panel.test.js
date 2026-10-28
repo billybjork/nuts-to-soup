@@ -5,9 +5,10 @@ import { JSDOM } from 'jsdom';
 import { normalize, isDone } from '../lib/store.js';
 import { NTS, trackAt } from '../lib/nts.js';
 import { buildProfile, orderQueue, topGenres } from '../lib/rank.js';
+import * as view from '../lib/view.js';
 const html = readFileSync(new URL('../panel/panel.html', import.meta.url), 'utf8');
 const source = readFileSync(new URL('../panel/panel.js', import.meta.url), 'utf8').replace(
-  /^import .*;\n/gm,
+  /^import [^;]*;\n/gm,
   '',
 );
 const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
@@ -40,6 +41,7 @@ async function panel(t, sendMessage) {
     buildProfile,
     orderQueue,
     topGenres,
+    ...view,
     matchMedia: () => ({ matches: true }),
     CSS: { escape: (value) => value },
     chrome: { runtime: { sendMessage }, storage: { onChanged: { addListener() {} } } },
