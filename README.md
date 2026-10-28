@@ -41,7 +41,7 @@ NTS saves your position to your account only when playback stops: pause, switchi
 
 ## Terminal
 
-`nts` and `nts tui` control the extension from a terminal. Chrome still does the playing, in your NTS tab, so plays count for hosts and show up in your NTS history.
+`nts` controls the extension from any terminal: `nts toggle`, `nts skip`, `nts next`, and `nts tui` (or `nts player`) for a full-screen player. Chrome still does the playing, in your NTS tab, so plays count for hosts and show up in your NTS history. Chrome has to be running, but you don't need to look at it.
 
 ```
 nts CLI / TUI ──NDJSON over a Unix socket──▶ native host ──native messaging──▶ the extension ──▶ NTS tab
@@ -57,7 +57,7 @@ npm install
 npm run install-host
 ```
 
-Then reload the extension at `chrome://extensions`. `install-host` writes:
+Then reload the extension at `chrome://extensions`, and reload any open nts.live tabs. `install-host` writes:
 
 - the host manifest, `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.billybjork.nuts_to_soup.json`, allowing only this extension (its ID comes from the `key` in `manifest.json`)
 - `~/Library/Application Support/nuts-to-soup/host`, which runs `tui/host.js`. The host listens on `bridge.sock` in the same folder (owner-only) and logs to `host.log`
@@ -65,42 +65,43 @@ Then reload the extension at `chrome://extensions`. `install-host` writes:
 
 Chrome starts native hosts with a minimal environment, so both wrappers run the `node` you installed with by its absolute path. Run `npm run install-host` again after switching Node versions, and `npm run uninstall-host` to remove all of the above.
 
-The extension connects to the host when Chrome starts and stays connected, which also keeps its service worker running. If you use the extension in two Chrome profiles, the first one to connect serves the terminal.
+The extension connects to the host when Chrome starts, and reconnects on its own if the connection drops. Chrome keeps an extension's service worker running while it has a native connection open (Chrome 105+), so terminal commands don't wait for it to start. If you use the extension in two Chrome profiles, the first one to connect serves the terminal.
 
 ### CLI
 
 ```
 nts status [--json]          what's playing, where, and the current track
 nts toggle                   play or pause
-nts play | nts pause
+nts play                     play (resume)
+nts pause                    pause
 nts play <n | alias | url>   play queue card n, an episode, or an NTS link (added if new)
 nts skip                     next episode
 nts next                     next track in this episode
 nts queue [-n N] [--json]    the queue in play order, as the panel shows it
 nts add <url>...             add episode links
 nts sync                     sync from My NTS
-nts tui                      the full-screen player
+nts tui                      the full-screen player (also: nts player)
 ```
 
-If Chrome isn't running, `nts` starts it in the background (`open -g`) and waits up to 10 seconds for the extension to connect. Commands that start playback can still need the NTS tab brought to the front, as in the panel; `nts` says when.
+If Chrome isn't running, `nts` starts it in the background (`open -g`) and waits up to 10 seconds for the extension to connect. Commands that start playback can still need a click on play in the NTS tab, as in the panel (Chrome won't always start Mixcloud episodes without one). `nts` brings the tab to the front and says so.
 
 ### TUI
 
-`nts tui` shows the queue (stacked by show), what's playing with its progress and current track, and the Tracks and Hosts views. It updates as the extension's state changes. Keys are the panel's: `J`/`K`, `Enter` play, `Shift`+`Enter` play next (or `T`, for terminals that can't tell it from `Enter`), `Alt`+`↑`/`↓` reorder, `X` remove, `Space` play/pause, `N` skip, `Shift`+`N` next track, `1` `2` `3` views, `Q` quit. If Chrome quits, it waits and reconnects when Chrome is back.
+`nts tui` (or `nts player`) shows the queue (stacked by show), what's playing with its progress and current track, and the Tracks and Hosts views. It updates as the extension's state changes. Keys are the panel's: `J`/`K`, `Enter` play, `Shift`+`Enter` play next (or `T`, for terminals that can't tell it from `Enter`), `Alt`+`↑`/`↓` reorder, `X` remove, `Space` play/pause, `N` skip, `Shift`+`N` next track, `1` `2` `3` views, `Q` quit. If Chrome quits, it waits and reconnects when Chrome is back.
 
 ### Rex
 
-[`tui/rex/init.lua`](tui/rex/init.lua) is an example [Rex](https://www.superlogical.com/rex) config. Copy it into `~/.config/rex/init.lua` (or `require` it from there) and run `rex config reload`. It adds five actions to the command palette, under "NTS":
+[`tui/rex/init.lua`](tui/rex/init.lua) is an example [Rex](https://www.superlogical.com/rex) config. Copy it into `~/.config/rex/init.lua` (or `require` it from there) and run `rex config reload`. It adds five Rex actions. These run inside Rex, not in a shell: pick them from the command palette (type "NTS"), or run `rex do nts_toggle` and so on. Each runs the `nts` command in the last column, which you can also type in any terminal.
 
-| Action       | Palette title                 |
-| ------------ | ----------------------------- |
-| `nts_toggle` | NTS: Play / Pause             |
-| `nts_skip`   | NTS: Skip to the Next Episode |
-| `nts_next`   | NTS: Next Track               |
-| `nts_status` | NTS: What's Playing           |
-| `nts_player` | NTS: Toggle Player            |
+| Rex action   | Palette title                 | Runs         |
+| ------------ | ----------------------------- | ------------ |
+| `nts_toggle` | NTS: Play / Pause             | `nts toggle` |
+| `nts_skip`   | NTS: Skip to the Next Episode | `nts skip`   |
+| `nts_next`   | NTS: Next Track               | `nts next`   |
+| `nts_status` | NTS: What's Playing           | `nts status` |
+| `nts_player` | NTS: Toggle Player            | `nts tui`    |
 
-**Toggle Player** opens `nts tui` in a pane beside the focused one, and closes it again. Quitting the player with `Q` closes it too. The actions run `nts` with `rex.exec`, which doesn't hold up the Rex server while a command waits. To bind one to a key, add a line such as `rex.bind("cmd+shift+m", "nts_player")`. Try an action before reloading with `rex do tui/rex/init.lua --action nts_status`.
+**Toggle Player** opens `nts tui` in a pane beside the focused one, and closes it again. Quitting the player with `Q` closes it too. The actions run `nts` with `rex.exec`, which doesn't hold up the Rex server while a command waits. To bind one to a key, add a line such as `rex.bind("cmd+shift+m", "nts_player")`. Try an action before reloading with `rex do tui/rex/init.lua --action nts_status`. The actions expect `nts` in `~/.local/bin`; if you installed it elsewhere with `--bin`, change the path at the top of the file.
 
 ## Files
 

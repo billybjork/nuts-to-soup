@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// nts: control Nuts to Soup from the terminal. Key bindings run this on every
-// press, so it stays free of Ink and React; `nts tui` loads those.
+// nts: control Nuts to Soup from the terminal. Rex actions and scripts run
+// this for every command, so it stays free of Ink and React; `nts tui` loads
+// those.
 import { connect } from './client.js';
 import { NTS, parsePath } from '../lib/nts.js';
 import { fmtDate, fmtTime, isPlaying, nowView, queueCards, trackName } from '../lib/view.js';
@@ -17,7 +18,7 @@ const USAGE = `Usage: nts <command>
   queue [-n N] [--json]    the queue, in play order (default 20)
   add <url>...             add NTS episode links to the queue
   sync                     sync follows, saved and history from My NTS
-  tui                      the full-screen player`;
+  tui, player              the full-screen player`;
 
 class UsageError extends Error {}
 
@@ -108,7 +109,7 @@ async function playTarget(client, s, target) {
 
 async function run() {
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') return USAGE;
-  if (cmd === 'tui') {
+  if (cmd === 'tui' || cmd === 'player') {
     const { runTui } = await import('./app.js');
     return runTui();
   }
