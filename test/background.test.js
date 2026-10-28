@@ -20,8 +20,21 @@ const storage = (data) => ({
     delete data[key];
   },
 });
+// Native ports the worker opened, newest last.
+const ports = [];
+const connectNative = (name) => {
+  const port = { name, sent: [], postMessage: (m) => port.sent.push(structuredClone(m)) };
+  for (const e of ['onMessage', 'onDisconnect']) port[e] = { addListener: (fn) => (port[e].fn = fn) };
+  ports.push(port);
+  return port;
+};
 globalThis.chrome = {
-  runtime: { onInstalled: event('installed'), onStartup: event('startup'), onMessage: event('message') },
+  runtime: {
+    onInstalled: event('installed'),
+    onStartup: event('startup'),
+    onMessage: event('message'),
+    connectNative,
+  },
   contextMenus: { onClicked: event('context') },
   alarms: { onAlarm: event('alarm') },
   tabs: { onRemoved: event('removed') },
@@ -313,4 +326,83 @@ test('tracklist failures preserve fetched detail and schedule retry rather than 
   assert.equal(local.eps.retry.tracks, undefined);
   assert.ok(local.eps.retry.retryAt > Date.now());
   await new Promise((resolve) => setImmediate(resolve));
+});
+
+// The bridge to the terminal: tui/host.js on the other end of a native port.
+const native = async (msg, id = 1) => {
+  const port = ports.at(-1);
+  const before = port.sent.length;
+  port.onMessage.fn({ id, msg });
+  for (let i = 0; i < 50 && port.sent.length === before; i++) await new Promise((r) => setImmediate(r));
+  return port.sent.at(-1);
+};
+
+test('the native host is sent the whole store when it connects', () => {
+  assert.equal(ports.length, 1);
+  assert.equal(ports[0].name, 'com.billybjork.nuts_to_soup');
+  assert.equal(ports[0].sent[0].type, 'state');
+  assert.equal(typeof ports[0].sent[0].data, 'object');
+});
+
+test('native commands reach the panel handlers and reply with their id', async () => {
+  local.settings = { autoAdvance: true };
+  const r = await native({ type: 'settings', settings: { autoAdvance: false } }, 7);
+  assert.deepEqual(r, { id: 7, ok: true, value: null });
+  assert.equal(local.settings.autoAdvance, false);
+  const bad = await native({ type: 'toggle' }, 8);
+  assert.equal(bad.id, 8);
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /Invalid toggle/);
+  assert.equal((await native({ type: 'constructor' }, 9)).ok, false);
+});
+
+test('native cannot send content-script messages', async () => {
+  session.playerTab = undefined;
+  const before = structuredClone(local);
+  for (const msg of [
+    {
+      type: 'nowPlaying',
+      alias: 'a',
+      path: '/shows/h/episodes/a',
+      playbackId: 'x',
+      startedAt: 9e12,
+      pos: 0,
+      dur: 1,
+    },
+    { type: 'progress', alias: 'a', playbackId: 'x', pos: 1, dur: 2, playing: true },
+    { type: 'ended', alias: 'a', playbackId: 'x' },
+    { type: 'scraped', kind: 'signedOut' },
+    { type: 'isSyncTab' },
+    { type: 'refreshStream', index: 0 },
+  ]) {
+    const r = await native(msg);
+    assert.equal(r.ok, false, msg.type);
+    assert.match(r.error, /NTS page/);
+  }
+  assert.deepEqual(local, before);
+});
+
+test('storage changes are forwarded to the native host as deltas', () => {
+  const port = ports.at(-1);
+  listeners.storage(
+    { 'p:a': { oldValue: { pos: 1 }, newValue: { pos: 6 } }, gone: { oldValue: 1 } },
+    'local',
+  );
+  listeners.storage({ syncTab: { newValue: {} } }, 'session');
+  assert.deepEqual(port.sent.at(-1), { type: 'delta', set: { 'p:a': { pos: 6 } }, removed: ['gone'] });
+});
+
+test('a disconnected native port reconnects with backoff', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const count = ports.length;
+  ports.at(-1).onDisconnect.fn();
+  t.mock.timers.tick(999);
+  assert.equal(ports.length, count);
+  t.mock.timers.tick(1);
+  assert.equal(ports.length, count + 1);
+  ports.at(-1).onDisconnect.fn();
+  t.mock.timers.tick(1999);
+  assert.equal(ports.length, count + 1);
+  t.mock.timers.tick(1);
+  assert.equal(ports.length, count + 2);
 });

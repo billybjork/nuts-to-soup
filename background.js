@@ -1,4 +1,4 @@
-import { validateMessage } from './lib/messages.js';
+import { validateMessage, senderSource } from './lib/messages.js';
 import {
   NTS,
   LATEST_MAX_OFFSET,
@@ -646,6 +646,10 @@ async function add(urls) {
 
 // --- messages -----------------------------------------------------------------
 
+// A state change made for a command. The reply carries nothing: the change
+// itself reaches the panel and the terminal through storage.
+const change = (fn) => mutate(fn).then(() => null);
+
 const handlers = {
   play: (m) => serial(() => play(m.alias, { front: true })),
   jump: (m) => serial(() => jump(m)),
@@ -690,7 +694,7 @@ const handlers = {
   // shown. The rest stays ranked, following on from what it did before, so
   // it keeps the order you saw.
   reorder: (m) =>
-    mutate((s) => {
+    change((s) => {
       const shown = orderQueue(s, buildProfile(s));
       if (m.aliases.length !== shown.length || m.aliases.some((a) => !shown.some((c) => c.alias === a))) {
         throw new Error('The queue changed. Try reordering again.');
@@ -705,14 +709,14 @@ const handlers = {
 
   // Play next: to the top of the queue, stack and all.
   top: (m) =>
-    mutate((s) => {
+    change((s) => {
       if (has(s.queue, m.alias)) place(s, m.alias, topRank(s.queue));
       return ['queue'];
     }),
 
   // Taking something out of the queue counts against it, like a dismissal.
   remove: (m) =>
-    mutate((s) => {
+    change((s) => {
       for (const alias of m.aliases) {
         s.queue = without(s.queue, alias);
         s.dismissed[alias] = Date.now();
@@ -721,7 +725,7 @@ const handlers = {
     }),
 
   settings: (m) =>
-    mutate((s) => {
+    change((s) => {
       s.settings = { ...s.settings, ...m.settings };
       return ['settings'];
     }),
@@ -732,7 +736,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (!handler) return false;
   Promise.resolve()
     .then(() => {
-      validateMessage(msg, sender);
+      validateMessage(msg, senderSource(sender));
       return handler(msg, sender);
     })
     .then(
@@ -741,3 +745,81 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     );
   return true;
 });
+
+// --- terminal bridge ------------------------------------------------------------
+
+// The native host (tui/host.js) relays the panel's commands from the nts CLI
+// and TUI. It's sent the whole store when it connects, then every change.
+// An open native port keeps this worker running (Chrome 105+), so terminal
+// commands never wait for it to start.
+const NATIVE_HOST = 'com.billybjork.nuts_to_soup';
+const native = { port: null, ready: false, pending: [], retry: 0, timer: null };
+
+function post(port, msg) {
+  try {
+    port.postMessage(msg);
+  } catch {} // disconnected; onDisconnect reconnects
+}
+
+function connectNative() {
+  clearTimeout(native.timer);
+  let port;
+  try {
+    port = chrome.runtime.connectNative(NATIVE_HOST);
+  } catch {
+    return reconnectNative();
+  }
+  const openedAt = Date.now();
+  Object.assign(native, { port, ready: false, pending: [] });
+  port.onMessage.addListener((m) => onNative(port, m));
+  port.onDisconnect.addListener(() => {
+    void chrome.runtime.lastError; // host not installed, or it exited
+    if (native.port !== port) return;
+    native.port = null;
+    // A host that stayed up a while was fine; start the backoff over.
+    if (Date.now() - openedAt > 30_000) native.retry = 0;
+    reconnectNative();
+  });
+  // Changes made while the snapshot is read are held, then sent after it.
+  chrome.storage.local.get(null).then((all) => {
+    if (native.port !== port) return;
+    post(port, { type: 'state', data: all });
+    for (const delta of native.pending) post(port, delta);
+    Object.assign(native, { ready: true, pending: [] });
+  });
+}
+
+// 1s, 2s, 4s… up to 5 minutes. If the worker sleeps meanwhile (no host
+// installed), it connects again next time it starts.
+function reconnectNative() {
+  clearTimeout(native.timer);
+  native.timer = setTimeout(connectNative, Math.min(300_000, 1000 * 2 ** native.retry++));
+}
+
+async function onNative(port, m) {
+  const id = m?.id;
+  let reply;
+  try {
+    const msg = m?.msg;
+    const handler = Object.hasOwn(handlers, msg?.type) && handlers[msg.type];
+    if (!handler) throw new Error('Unknown command');
+    validateMessage(msg, 'native');
+    reply = { id, ok: true, value: (await handler(msg, {})) ?? null };
+  } catch (err) {
+    reply = { id, ok: false, error: String(err?.message || err) };
+  }
+  post(port, reply);
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !native.port) return;
+  const delta = { type: 'delta', set: {}, removed: [] };
+  for (const [k, c] of Object.entries(changes)) {
+    if ('newValue' in c) delta.set[k] = c.newValue;
+    else delta.removed.push(k);
+  }
+  if (native.ready) post(native.port, delta);
+  else native.pending.push(delta);
+});
+
+connectNative();
