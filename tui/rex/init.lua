@@ -1,19 +1,12 @@
--- Nuts to Soup in Rex: play/pause, skip and next track from anywhere, and
--- the player in a floating pane.
+-- Nuts to Soup in Rex: play/pause, skip and next track, and the player in
+-- a pane beside the one you're in. Find them in the command palette under
+-- "NTS", or run them with `rex do nts_toggle` and so on.
 --
 -- Copy this into ~/.config/rex/init.lua (or save it beside that file and
 -- `require` it), then run `rex config reload`. The actions run the `nts`
 -- command that `npm run install-host` (in tui/) puts in ~/.local/bin.
---
--- Press Ctrl+Cmd+N, then:
---   Space    play / pause
---   N        skip to the next episode
---   Shift+N  next track
---   S        what's playing, as a notification
---   P        the player (nts tui) in a floating pane; again to close it
 
 local nts = os.getenv("HOME") .. "/.local/bin/nts"
-local prefix = "ctrl+cmd+n"
 local player = "nts-player" -- the player pane's label, to find it again
 
 -- Runs nts and returns what it printed. rex.exec lets the server go on
@@ -27,16 +20,6 @@ local function run(...)
   if r.timed_out then error("nts timed out", 0) end
   if out == "" then out = "nts failed (" .. (r.signal or ("exit " .. r.code)) .. ")" end
   error(out, 0)
-end
-
-local function notify(title, text)
-  rex.exec({
-    "osascript",
-    "-e", "on run argv",
-    "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
-    "-e", "end run",
-    title, text,
-  })
 end
 
 rex.action{
@@ -64,24 +47,17 @@ rex.action{
   name = "nts_status",
   title = "NTS: What's Playing",
   category = "Nuts to Soup",
-  run = function(ctx)
-    local text = run("status")
-    if ctx.origin == "key" or ctx.origin == "palette" then
-      local first, rest = text:match("^([^\n]*)\n?(.*)$")
-      notify(first, rest ~= "" and rest or first)
-    end
-    return { status = text }
-  end,
+  run = function() return { status = run("status") } end,
 }
 
--- The floating layer holding the player, if one is open in this session.
-local function player_layer()
+-- The player's pane, if one is open in this session.
+local function player_block()
   local view, err = rex.session.view{}
   if view == nil then error(err, 0) end
   for _, w in ipairs(view.windows or {}) do
     for _, layer in ipairs(w.layers or {}) do
       for _, b in ipairs(layer.blocks or {}) do
-        if b.label == player and layer.kind ~= "tiled" then return layer.layer_id end
+        if b.label == player then return b.block_id end
       end
     end
   end
@@ -91,16 +67,19 @@ rex.action{
   name = "nts_player",
   title = "NTS: Toggle Player",
   category = "Nuts to Soup",
-  run = function()
-    local open = player_layer()
+  run = function(ctx)
+    local open = player_block()
     if open then
-      local _, err = rex.session.close_layer{ layer_id = open }
+      local _, err = rex.call("block.close", { session_id = ctx.session_id, block_id = open })
       if err ~= nil then error(err, 0) end
       return { closed = open }
     end
-    -- Quitting the player (q) closes the pane, and its layer with it.
-    local r, err = rex.session.new_layer{
-      bounds = { 0.15, 0.1, 0.7, 0.8 },
+    -- Beside the focused pane. Quitting the player (q) closes it.
+    local r, err = rex.session.new_split{
+      anchor_id = ctx.block_id,
+      direction = "horizontal",
+      side = "after",
+      ratio = 0.55,
       focus = true,
       layout = rex.layout.block{
         flavor = "com.superlogical.terminal.shell",
@@ -109,12 +88,6 @@ rex.action{
       },
     }
     if r == nil then error(err, 0) end
-    return { opened = r.layer_id }
+    return { opened = r.block_ids[1] }
   end,
 }
-
-rex.bind(prefix .. ">space", "nts_toggle")
-rex.bind(prefix .. ">n", "nts_skip")
-rex.bind(prefix .. ">shift+n", "nts_next")
-rex.bind(prefix .. ">s", "nts_status")
-rex.bind(prefix .. ">p", "nts_player")

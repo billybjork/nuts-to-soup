@@ -90,17 +90,17 @@ If Chrome isn't running, `nts` starts it in the background (`open -g`) and waits
 
 ### Rex
 
-[`tui/rex/init.lua`](tui/rex/init.lua) is an example [Rex](https://www.superlogical.com/rex) config. Copy it into `~/.config/rex/init.lua` (or `require` it from there) and run `rex config reload`. It defines `nts_toggle`, `nts_skip`, `nts_next`, `nts_status` and `nts_player` (the TUI in a floating pane, toggled), bound behind `Ctrl`+`Cmd`+`N`:
+[`tui/rex/init.lua`](tui/rex/init.lua) is an example [Rex](https://www.superlogical.com/rex) config. Copy it into `~/.config/rex/init.lua` (or `require` it from there) and run `rex config reload`. It adds five actions to the command palette, under "NTS":
 
-| `Ctrl`+`Cmd`+`N`, then |                                 |
-| ---------------------- | ------------------------------- |
-| `Space`                | play / pause                    |
-| `N`                    | skip to the next episode        |
-| `Shift` + `N`          | next track                      |
-| `S`                    | what's playing (a notification) |
-| `P`                    | open or close the player        |
+| Action       | Palette title                 |
+| ------------ | ----------------------------- |
+| `nts_toggle` | NTS: Play / Pause             |
+| `nts_skip`   | NTS: Skip to the Next Episode |
+| `nts_next`   | NTS: Next Track               |
+| `nts_status` | NTS: What's Playing           |
+| `nts_player` | NTS: Toggle Player            |
 
-The actions run `nts` with `rex.exec`, which doesn't hold up the Rex server while a command waits. Try one before reloading with `rex do tui/rex/init.lua --action nts_status`.
+**Toggle Player** opens `nts tui` in a pane beside the focused one, and closes it again. Quitting the player with `Q` closes it too. The actions run `nts` with `rex.exec`, which doesn't hold up the Rex server while a command waits. To bind one to a key, add a line such as `rex.bind("cmd+shift+m", "nts_player")`. Try an action before reloading with `rex do tui/rex/init.lua --action nts_status`.
 
 ## Files
 
