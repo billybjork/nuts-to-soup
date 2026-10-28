@@ -12,7 +12,7 @@
   const QUIET_AFTER_END_MS = 20000; // ignore NTS's own "up next" while ours loads
   const STALL_MS = 10000; // unpaused but stuck this long means the stream died
   const STALE_STALL_MS = 2000; // ...or this long once its URLs have expired
-  const RELOAD_GAP_MS = 30000; // don't reload a dead stream more often than this
+  const REFRESH_GAP_MS = 30000; // don't replace a dead stream more often than this
   const MIXCLOUD_ORIGIN = 'https://player-widget.mixcloud.com';
 
   // A copy injected after an extension reload retires the older one on the page.
@@ -146,8 +146,12 @@
   // signed to expire about four hours after NTS resolves the stream. Pause
   // for longer (overnight, say) and pressing play runs through what was
   // buffered, then every request fails and the player sits at the end of its
-  // buffer, unpaused and with no error, for good. The fix is loading the
-  // episode again, which resolves a fresh stream.
+  // buffer (or mid-seek), unpaused and with no error, for good.
+  //
+  // Loading the episode again doesn't help: NTS treats loading the episode it
+  // already has as play/pause. It only resolves a new stream for the same
+  // episode when its <audio> reports a network error, which an hls.js 403
+  // never does, so we fake that error (see refreshStream in background.js).
   let streamExpires = Infinity;
   const streamStale = () => Date.now() > streamExpires - 60000;
 
@@ -174,26 +178,50 @@
     // no expiry tracking; the stall check below still catches it
   }
 
+  // Swaps a dead stream for a fresh one and puts the position back, since the
+  // new stream starts from 0. Muted until then, so that start isn't heard.
+  let refreshing = null;
+  function refresh(el, pos = el.currentTime) {
+    return (refreshing ??= (async () => {
+      const src = el.src;
+      const muted = el.muted;
+      if (current) Object.assign(current, { target: pos, seekedAt: Date.now(), startedAt: Date.now(), attempts: 0, floor: 0 });
+      el.muted = true;
+      try {
+        const index = [...document.querySelectorAll('audio')].indexOf(el);
+        if ((await send({ type: 'refreshStream', index }))?.value !== true) return false;
+        const end = Date.now() + 10000;
+        while (el.src === src || el.readyState < 1) {
+          if (Date.now() >= end) return false;
+          await sleep(100);
+        }
+        if (current) Object.assign(current, { seekedAt: Date.now(), startedAt: Date.now() });
+        el.currentTime = pos;
+        return true;
+      } finally {
+        el.muted = muted;
+        refreshing = null;
+      }
+    })());
+  }
+
   let stuck = { el: null, pos: -1, since: 0 };
-  let reloadedAt = 0;
+  let refreshedAt = 0;
 
   function checkStall() {
-    if (superseded()) return;
+    if (superseded() || refreshing) return;
     const el = player(activeEpisode())?.el;
-    // readyState 3+ means it has data to move on to, so it isn't starved.
-    if (!el || el.paused || el.seeking || el.readyState >= 3) return (stuck = { el: null, pos: -1, since: 0 });
+    // readyState 3+ means it has data to move on to, so it isn't starved. A
+    // seek counts: one into a dead stream never finishes.
+    if (!el || el.paused || el.readyState >= 3) return (stuck = { el: null, pos: -1, since: 0 });
     if (stuck.el !== el || Math.abs(el.currentTime - stuck.pos) > 0.5) {
       return (stuck = { el, pos: el.currentTime, since: Date.now() });
     }
     if (Date.now() - stuck.since < (streamStale() ? STALE_STALL_MS : STALL_MS)) return;
-    if (Date.now() - reloadedAt < RELOAD_GAP_MS) return;
-    const path = footerPath();
-    const alias = path?.split('/')[4] || current?.alias;
-    if (!alias) return;
-    reloadedAt = Date.now();
+    if (Date.now() - refreshedAt < REFRESH_GAP_MS) return;
+    refreshedAt = Date.now();
     stuck = { el: null, pos: -1, since: 0 };
-    const at = el.currentTime >= 1 ? Math.floor(el.currentTime) : undefined; // else where it was left
-    send({ type: 'stalled', alias, path, at });
+    refresh(el);
   }
 
   // Interval timers in a silent background tab can be held back for a minute;
@@ -399,22 +427,24 @@
     return settle(want, 2500);
   }
 
-  // Loaded and still able to play: not a stream whose URLs have expired.
-  function playable(alias) {
+  // The loaded episode's player, with a fresh stream if its URLs have expired.
+  async function playable(alias, pos) {
     const p = hasLoaded(alias) && player(activeEpisode());
-    return p && !(p.el && streamStale()) ? p : null;
+    if (!p) return null;
+    if (p.el && streamStale() && !(await refresh(p.el, pos))) return null;
+    return p;
   }
 
   // 'missing': the extension should load the episode instead.
   // 'blocked': it's there but Chrome wouldn't start it (tab never shown).
   async function playLoaded(alias) {
-    if (!playable(alias)) return 'missing';
+    if (!(await playable(alias))) return 'missing';
     return (await setPlaying(true)) ? 'playing' : 'blocked';
   }
 
   // Jump within the episode that's loaded, starting playback if it's paused.
   async function jumpTo(alias, t) {
-    const p = playable(alias);
+    const p = await playable(alias, t);
     if (!p) return 'missing';
     if (current) Object.assign(current, { floor: 0, target: null });
     p.seek(t);

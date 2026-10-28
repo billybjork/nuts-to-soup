@@ -513,11 +513,28 @@ const handlers = {
   skip: () => serial(skip),
   toggle: (m) => serial(() => toggle(m.play)),
   ended: (m) => onEnded(m.alias),
-  // The tab's stream died (its URLs expire a few hours after it loads), so
-  // load it again there, from where it stopped.
-  stalled: async (m, sender) => {
-    await chrome.storage.session.set({ playerTab: sender.tab.id });
-    return serial(() => play(m.alias, { at: m.at, path: m.path }));
+  // A dead stream in the tab (its URLs expire a few hours after it loads).
+  // NTS fetches a new one when its <audio> reports a network error, so report
+  // one where NTS's listener can see it: in the page's own world, not the
+  // content script's.
+  refreshStream: async (m, sender) => {
+    const [r] = await chrome.scripting.executeScript({
+      target: { tabId: sender.tab.id, frameIds: [sender.frameId] },
+      world: 'MAIN',
+      args: [m.index],
+      func: (index) => {
+        const el = document.querySelectorAll('audio')[index];
+        if (!el) return false;
+        Object.defineProperty(el, 'error', { configurable: true, get: () => ({ code: 4, message: '' }) });
+        try {
+          el.dispatchEvent(new Event('error'));
+        } finally {
+          delete el.error;
+        }
+        return true;
+      },
+    });
+    return r?.result === true;
   },
   nowPlaying: (m, sender) => onNowPlaying(m, sender),
   scraped: (m, sender) => onScraped(m, sender),
