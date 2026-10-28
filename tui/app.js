@@ -208,11 +208,19 @@ function App({ initial }) {
     return () => clearInterval(timer);
   }, [playing]);
 
+  // Messages clear after a few seconds, except the one asking you to press
+  // play in the NTS tab, which stays until something plays.
+  const [waiting, setWaiting] = useState(false);
   useEffect(() => {
-    if (!toast) return;
+    if (!toast || waiting) return;
     const timer = setTimeout(() => setToast(null), 3500);
     return () => clearTimeout(timer);
-  }, [toast]);
+  }, [toast, waiting]);
+  useEffect(() => {
+    if (!waiting || !playing) return;
+    setWaiting(false);
+    setToast(null);
+  }, [waiting, playing]);
 
   const cards = useMemo(() => (s ? queueCards(s) : []), [s]);
   const v = s && nowView(s, seek);
@@ -233,12 +241,14 @@ function App({ initial }) {
   async function run(msg) {
     const starting = ['play', 'jump', 'skip'].includes(msg.type) || msg.play === true;
     const slow = starting && setTimeout(() => setToast('Loading in your NTS tab…'), 400);
+    setWaiting(false);
     try {
       const value = await client.request(msg);
       if (value?.empty) setToast('Queue is empty');
-      else if (value?.started === false)
+      else if (value?.started === false) {
         setToast("Switched to the NTS tab. Press play there if it hasn't started");
-      else if (starting) setToast(null);
+        setWaiting(true);
+      } else if (starting) setToast(null);
       return value;
     } catch (error) {
       setSeek(null);
