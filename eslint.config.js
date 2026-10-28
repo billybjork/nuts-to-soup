@@ -4,7 +4,7 @@ import globals from 'globals';
 export default [
   { ignores: ['node_modules/**'] },
   js.configs.recommended,
-  { files: ['test/**/*.js', 'eslint.config.js'], languageOptions: { globals: globals.node } },
+  { files: ['test/**/*.js', 'tui/**/*.js', 'eslint.config.js'], languageOptions: { globals: globals.node } },
   {
     files: ['**/*.js'],
     languageOptions: { globals: { ...globals.browser, chrome: 'readonly' } },

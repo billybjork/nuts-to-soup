@@ -1,0 +1,21 @@
+{
+  "name": "nuts-to-soup-terminal",
+  "private": true,
+  "type": "module",
+  "description": "Terminal remote control for the Nuts to Soup extension",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "bin": {
+    "nts": "./cli.js"
+  },
+  "scripts": {
+    "install-host": "node install.js",
+    "uninstall-host": "node install.js --uninstall"
+  },
+  "dependencies": {
+    "htm": "^3.1.1",
+    "ink": "^8.0.0",
+    "react": "^19.3.1"
+  }
+}
