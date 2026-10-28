@@ -23,8 +23,10 @@ local function run(...)
   local r, err = rex.exec({ nts, ... }, { timeout = 28 })
   if r == nil then error(err, 0) end
   local out = (r.ok and r.stdout or r.stderr):gsub("^nts: ", ""):gsub("%s+$", "")
-  if not r.ok then error(out, 0) end
-  return out
+  if r.ok then return out end
+  if r.timed_out then error("nts timed out", 0) end
+  if out == "" then out = "nts failed (" .. (r.signal or ("exit " .. r.code)) .. ")" end
+  error(out, 0)
 end
 
 local function notify(title, text)
