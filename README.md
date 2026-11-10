@@ -121,7 +121,7 @@ No build step. Edit, then press reload on `chrome://extensions`. Reload any open
 
 These are the parts most likely to break if NTS changes their front end:
 
-- `.mixcloud-btn` + `data-*` attributes: how episodes are loaded
+- `.episode-play-btn` + `data-*` attributes: how episodes are loaded (it was `.mixcloud-btn` until November 2026, and the rename failed silently: loads did nothing)
 - `localStorage.activeEpisode`: which episode is playing and where
 - `.footer-player--episode-player`: the footer player (play/pause, Mixcloud iframe)
 - `.my-nts__list-container .article-list-item`: My NTS lists

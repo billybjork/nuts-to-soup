@@ -418,10 +418,13 @@
 
   // NTS has one document-level click listener for every play button, which
   // reads the episode from data-* attributes. A hidden button of our own goes
-  // through exactly the same path as clicking play on the site.
+  // through exactly the same path as clicking play on the site. The listener
+  // only acts on its class (`mixcloud-btn` until November 2026), and ignores
+  // anything else without a sound.
+  const PLAY_BUTTON_CLASS = 'episode-play-btn';
   function load(ep) {
     const b = document.createElement('button');
-    b.className = 'mixcloud-btn';
+    b.className = PLAY_BUTTON_CLASS;
     b.hidden = true;
     const data = {
       src: ep.src,

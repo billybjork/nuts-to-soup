@@ -6,6 +6,7 @@ const source = readFileSync(new URL('../content.js', import.meta.url), 'utf8');
 
 function page() {
   const messages = [],
+    clicked = [],
     intervals = [],
     listeners = {},
     observers = [];
@@ -30,6 +31,12 @@ function page() {
           }
         : null,
     querySelectorAll: (selector) => (selector === 'audio' ? [audio] : []),
+    body: { append() {} },
+    createElement: () => {
+      const el = { attributes: {}, setAttribute: (k, v) => (el.attributes[k] = v), remove() {} };
+      el.click = () => clicked.push(el);
+      return el;
+    },
     addEventListener: (name, fn) => {
       listeners[name] = fn;
     },
@@ -89,6 +96,7 @@ function page() {
   vm.runInContext(source, context);
   return {
     messages,
+    clicked,
     audio,
     root,
     observers,
@@ -138,4 +146,19 @@ test('the archive audio ending reports the playback identity exactly once', () =
   p.listeners.ended({ target: p.audio });
   assert.equal(p.messages.filter((m) => m.type === 'ended').length, 1);
   assert.equal(p.messages.at(-1).playbackId, 'session');
+});
+
+// NTS's one click listener acts only on buttons with its play-button class.
+// When NTS renamed it (from mixcloud-btn), every load silently did nothing.
+test('loading an episode presses a button NTS treats as play', async (t) => {
+  const p = page();
+  t.after(() => (p.root.dataset.ntsq = 'retired')); // ends its wait to start: this clock stands still
+  p.command({
+    type: 'load',
+    ep: { alias: 'b', path: '/shows/h/episodes/b', src: 'https://soundcloud.com/x' },
+  });
+  const [b] = p.clicked;
+  assert.equal(b.className.split(' ').includes('episode-play-btn'), true);
+  assert.equal(b.attributes['data-permalink'], '/shows/h/episodes/b');
+  assert.equal(b.attributes['data-src'], 'https://soundcloud.com/x');
 });
