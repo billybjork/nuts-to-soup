@@ -133,7 +133,7 @@ These are the parts most likely to break if NTS changes their front end:
 
 ## Development checks
 
-Use Node.js 22.13 or newer, run `npm ci`, then `npm run check`. This runs ESLint,
+Use Node.js 22.13 or newer, run `npm ci` and `npm ci --prefix tui` (the TUI's tests need its packages), then `npm run check`. This runs ESLint,
 Prettier's formatting check, and Node's test runner. GitHub Actions runs the same
 command on pushes and pull requests. `npm run format` applies formatting;
 `npm run test:coverage` reports imported-module coverage (the simulated content
