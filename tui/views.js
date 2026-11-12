@@ -119,17 +119,19 @@ function NowArt({ gfx, s, v, width }) {
   const shown = useTurntable(gfx, url, rows, cols, v);
   const [still, stillCols] = coverImage(gfx, url, rows);
   const bd = backdropImage(gfx, url, width, rows);
-  useOverlay(gfx, 'backdrop', bd.ready ? [{ id: bd.id, row: TOP, col: 1, cols: width, rows, z: -1 }] : []);
   const textW = Math.max(10, width - cols - 5);
   const tl = timelineImage(gfx, 'now', textW, 1, { ep: v.ep, dur: v.dur, pos: v.pos, color });
+  // All placed directly, not through placeholders: the terminal draws a placed
+  // image over placeholder cells whatever its z, so anything on the backdrop
+  // has to be placed too, after it and above it.
+  const art = shown ? [shown, cols] : still.ready ? [still, stillCols] : null;
+  useOverlay(gfx, 'header', [
+    ...(bd.ready ? [{ id: bd.id, row: TOP, col: 1, cols: width, rows, z: -1 }] : []),
+    ...(art ? [{ id: art[0].id, row: TOP, col: 2, cols: art[1], rows, z: 1 }] : []),
+    { id: tl.id, row: TOP + 4, col: cols + 4, cols: textW, rows: 1, z: 1 },
+  ]);
   return ui`<${Box} paddingX=${1} height=${rows}>
-    <${Box} width=${cols} flexShrink=${0}>
-      ${
-        shown
-          ? ui`<${Img} e=${shown} cols=${cols} rows=${rows} />`
-          : ui`<${Img} e=${still} cols=${stillCols} rows=${rows} />`
-      }
-    <//>
+    <${Box} width=${cols} flexShrink=${0} />
     <${Box} flexDirection="column" marginLeft=${2} width=${textW}>
       <${Box}>
         <${Box} flexGrow=${1} flexShrink=${1}>
@@ -144,7 +146,7 @@ function NowArt({ gfx, s, v, width }) {
         ${v.track ? `♪ ${trackName(v.track)}` : v.playing ? 'No track listed here' : 'Paused'}
       <//>
       <${Text} wrap="truncate-end" dimColor>${v.next ? `next  ${trackName(v.next)}  at ${fmtTime(v.next.offset)}` : ' '}<//>
-      <${Img} e=${tl} cols=${textW} rows=${1} />
+      <${Box} height=${1} flexShrink=${0} />
       <${Text} wrap="truncate-end" dimColor>${[...v.ep.genres, ...v.ep.moods].join(' · ') || ' '}<//>
     <//>
   <//>`;

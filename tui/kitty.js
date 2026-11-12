@@ -1,8 +1,9 @@
 // The kitty graphics protocol, the parts the TUI uses. Images are sent once as
 // zlib'd RGBA and mostly shown through Unicode placeholders: ordinary text
 // cells that Ink lays out, scrolls and erases like any other character. The
-// few images that overlap others (the backdrop, the turntable) are placed
-// directly at a screen position.
+// images in the header (the backdrop, and the turntable and timeline on it)
+// are placed directly at a screen position: Rex draws a placed image over
+// placeholder cells whatever its z.
 // https://sw.kovidgoyal.net/kitty/graphics-protocol/
 import zlib from 'node:zlib';
 import DIACRITICS from './diacritics.js';

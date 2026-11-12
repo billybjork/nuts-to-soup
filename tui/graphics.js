@@ -128,7 +128,8 @@ export class Gfx {
     if (e.sig !== sig) {
       e.sig = sig;
       const img = make();
-      this.write(K.transmit(e.id, img) + K.virtual(e.id, cols, rows));
+      // Sending it again drops its direct placements: put them back.
+      this.write(K.transmit(e.id, img) + K.virtual(e.id, cols, rows) + this.placements());
       e.bytes = img.w * img.h * 4;
     }
     return { id: e.id, ready: true };

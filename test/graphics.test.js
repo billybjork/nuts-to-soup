@@ -253,6 +253,21 @@ test("overlays go up at once, are re-placed inside each of Ink's frames, and com
   assert.equal(stdout.out[7], 'after');
 });
 
+test('a timeline sent again is placed again, since sending drops its placements', () => {
+  const stdout = fakeStdout();
+  const gfx = new Gfx({ cw: 10, ch: 20, write: null, art: {} });
+  gfx.write = gfx.hook(stdout);
+  const img = () => ({ w: 4, h: 2, data: new Uint8ClampedArray(32) });
+  const tl = gfx.slot('now', 4, 1, 'a', img);
+  gfx.overlay('header', [{ id: tl.id, row: 7, col: 20, cols: 4, rows: 1, z: 1 }]);
+  const n = stdout.out.length;
+  gfx.slot('now', 4, 1, 'a', img);
+  assert.equal(stdout.out.length, n, 'unchanged, so not sent');
+  gfx.slot('now', 4, 1, 'b', img);
+  const sent = stdout.out.slice(n).join('');
+  assert.ok(sent.indexOf(`a=t,q=2,f=32,i=${tl.id}`) < sent.indexOf(`a=p,q=2,i=${tl.id},p=1,c=4,r=1,z=1`));
+});
+
 test('an image is sent once when ready, and freed when no render has used it for a while', async () => {
   const sent = [];
   const gfx = new Gfx({ cw: 10, ch: 20, write: (s) => sent.push(s), art: {} });
