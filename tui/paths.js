@@ -23,3 +23,6 @@ export function socketPath() {
   if (Buffer.byteLength(p) > MAX_SOCKET_PATH) throw new Error(`Socket path is too long for macOS: ${p}`);
   return p;
 }
+
+// Cover art the TUI has fetched, kept between runs.
+export const ART_CACHE = path.join(os.homedir(), 'Library', 'Caches', 'nuts-to-soup', 'art');

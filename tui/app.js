@@ -1,128 +1,39 @@
 // nts tui: a full-screen player. It shows what the side panel shows, from the
 // same view module, and updates from the extension's state changes as they
-// arrive. The only timer redraws the position while something plays.
+// arrive. The only timer redraws the position while something plays. In a
+// terminal with kitty graphics it shows covers, a small turntable and a
+// timeline (views.js); elsewhere, the same views in text.
 import fs from 'node:fs';
 import path from 'node:path';
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { render, Box, Text, useInput, useApp, useWindowSize } from 'ink';
 import htm from 'htm';
 import { connect } from './client.js';
 import { socketPath } from './paths.js';
 import { buildProfile } from '../lib/rank.js';
+import { ago, fmtDate, isPlaying, nowView, queueCards, queuedCount, hostsView } from '../lib/view.js';
+import { detect, Gfx, GfxProvider, useGfx } from './graphics.js';
 import {
-  ago,
-  fmtDate,
-  fmtTime,
-  isPlaying,
-  nowView,
-  queueCards,
-  queuedCount,
-  cardInfo,
-  tracksView,
-  hostsView,
-  trackName,
-} from '../lib/view.js';
+  Tabs,
+  Now,
+  List,
+  queueItems,
+  trackItems,
+  QueuePreview,
+  TrackPreview,
+  HostGrid,
+  hostGrid,
+  previewWidth,
+  HEADER_ROWS,
+} from './views.js';
 
 const ui = htm.bind(React.createElement);
-const VIEWS = ['queue', 'tracks', 'hosts'];
+const VIEWS = { 1: 'queue', 2: 'tracks', 3: 'hosts' };
 const KEYS =
   'j/k move · enter play · shift+enter/t play next · x remove · alt+↑/↓ reorder · space play/pause · n skip · N next track · 1/2/3 views · q quit';
+const ART_KEYS = `${KEYS.replace(' · q quit', '')} · d density · q quit`;
 
-// --- pieces ------------------------------------------------------------------------
-
-function Tabs({ view, count }) {
-  const tab = (v, label) =>
-    ui`<${Text} key=${v} bold=${view === v} dimColor=${view !== v} underline=${view === v}>${label}<//>`;
-  return ui`<${Box} gap=${2} paddingX=${1}>
-    <${Text} bold>Nuts to Soup<//>
-    ${[tab('queue', `1 Queue${count ? ` ${count}` : ''}`), tab('tracks', '2 Tracks'), tab('hosts', '3 Hosts')]}
-  <//>`;
-}
-
-function Now({ v, width }) {
-  if (!v)
-    return ui`<${Box} flexDirection="column" paddingX=${1} height=${3}>
-      <${Text} dimColor>Nothing playing. Enter plays the focused card, space plays the top one.<//>
-    <//>`;
-  const time = `${fmtTime(v.pos)}${v.dur ? ` / ${fmtTime(v.dur)}` : ''}`;
-  const bar = Math.max(0, width - 2);
-  const done = v.dur ? Math.round(Math.min(1, v.pos / v.dur) * bar) : 0;
-  return ui`<${Box} flexDirection="column" paddingX=${1} height=${3}>
-    <${Box}>
-      <${Box} flexGrow=${1} flexShrink=${1}>
-        <${Text} wrap="truncate-end">
-          <${Text} color=${v.playing ? 'green' : undefined}>${v.playing ? '▶ ' : '❚❚ '}<//>
-          <${Text} bold>${v.ep.name || v.alias}<//>
-        <//>
-      <//>
-      <${Text}> ${time}<//>
-    <//>
-    <${Text} wrap="truncate-end" dimColor=${!v.track}>
-      ${v.track ? `♪ ${trackName(v.track)}` : `${v.ep.show}${v.playing ? '' : ' · paused'}`}
-    <//>
-    <${Text}><${Text} color="green">${'━'.repeat(done)}<//><${Text} dimColor>${'─'.repeat(bar - done)}<//><//>
-  <//>`;
-}
-
-// A window onto `lines` that keeps line `at` in view.
-function List({ lines, at, height, empty }) {
-  const top = useRef(0);
-  if (at < top.current) top.current = at;
-  if (at >= top.current + height) top.current = at - height + 1;
-  top.current = Math.max(0, Math.min(top.current, Math.max(0, lines.length - height)));
-  if (!lines.length) return ui`<${Box} height=${height} paddingX=${1}><${Text} dimColor>${empty}<//><//>`;
-  return ui`<${Box} flexDirection="column" height=${height} overflow="hidden">
-    ${lines.slice(top.current, top.current + height)}
-  <//>`;
-}
-
-const Row = ({ on, children }) =>
-  ui`<${Text} wrap="truncate-end" inverse=${on}>${on ? '›' : ' '}${children} <//>`;
-
-// Each view's lines, and which of them can take focus: [{key, el, alias?, row?}].
-function queueLines(s, cards, focus) {
-  const w = String(cards.length).length;
-  return cards.map((c, i) => {
-    const { notes } = cardInfo(s, c);
-    const more = c.stack.length ? ui`<${Text} color="yellow"> ×${c.stack.length + 1}<//>` : '';
-    return {
-      key: c.key,
-      focusable: true,
-      el: ui`<${Row} key=${c.key} on=${i === focus}>
-        <${Text} dimColor> ${String(i + 1).padStart(w)} <//>${c.ep.name || c.alias}${more}
-        <${Text} dimColor>${'  '}${notes.join(' · ')}${c.ep.genres.length ? ` · ${c.ep.genres.join(', ')}` : ''}<//>
-      <//>`,
-    };
-  });
-}
-
-function trackLines(s, focus) {
-  const lines = [];
-  let i = 0;
-  for (const t of tracksView(s)) {
-    if (t.day)
-      lines.push({
-        key: `d${lines.length}`,
-        el: ui`<${Text} key=${`d${lines.length}`} bold> ${t.day}<//>`,
-      });
-    const on = i++ === focus;
-    const when = t.live
-      ? 'Playing'
-      : new Date(t.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    lines.push({
-      key: `t${i}`,
-      focusable: true,
-      track: t,
-      el: ui`<${Row} key=${`t${i}`} on=${on}>
-        <${Text} color=${t.live ? 'green' : undefined} dimColor=${!t.live}> ${when.padEnd(8)}<//
-        >${trackName(t)}
-        <${Text} dimColor>${'  '}${t.ep?.name || t.alias} · ${fmtTime(t.offset)}<//>
-      <//>`,
-    });
-  }
-  return lines;
-}
-
+// Hosts without graphics: the list the TUI always had.
 function hostLines(s, focus) {
   const { shows, genres } = hostsView(s, buildProfile(s));
   const head = (text) => ({ key: text, el: ui`<${Text} key=${text} bold> ${text}<//>` });
@@ -131,9 +42,9 @@ function hostLines(s, focus) {
     ...shows.map((h, i) => ({
       key: h.alias,
       focusable: true,
-      el: ui`<${Row} key=${h.alias} on=${i === focus}>
-        ${' '}${h.name}<${Text} dimColor>${'  '}${fmtDate(h.last)}<//><//
-      >`,
+      el: ui`<${Text} key=${h.alias} wrap="truncate-end" inverse=${i === focus}>
+        ${i === focus ? '›' : ' '} ${h.name}<${Text} dimColor>${'  '}${fmtDate(h.last)}<//>
+      <//>`,
     })),
     head('Your sound'),
     {
@@ -151,16 +62,16 @@ function hostLines(s, focus) {
   ];
 }
 
-// --- app ---------------------------------------------------------------------------
-
 function App({ initial }) {
   const { exit } = useApp();
+  const gfx = useGfx();
   const { columns, rows } = useWindowSize();
   const [client, setClient] = useState(initial);
   const [s, setS] = useState(initial.state);
   const [online, setOnline] = useState(true);
   const [view, setView] = useState('queue');
   const [focus, setFocus] = useState(0);
+  const [dense, setDense] = useState(false);
   const [toast, setToast] = useState(null);
   const [seek, setSeek] = useState(null); // a jump the NTS tab hasn't reported back yet
   const [, setTick] = useState(0);
@@ -208,6 +119,9 @@ function App({ initial }) {
     return () => clearInterval(timer);
   }, [playing]);
 
+  // Images no view has shown for a few renders are freed.
+  useEffect(() => gfx?.sweep());
+
   // Messages clear after a few seconds, except the one asking you to press
   // play in the NTS tab, which stays until something plays.
   const [waiting, setWaiting] = useState(false);
@@ -225,17 +139,42 @@ function App({ initial }) {
   const cards = useMemo(() => (s ? queueCards(s) : []), [s]);
   const v = s && nowView(s, seek);
 
-  let lines = [];
-  if (s && view === 'queue') lines = queueLines(s, cards, focus);
-  else if (s && view === 'tracks') lines = trackLines(s, focus);
-  else if (s) lines = hostLines(s, focus);
-  const focusable = lines.filter((l) => l.focusable);
-  const at = Math.max(0, lines.indexOf(focusable[Math.min(focus, focusable.length - 1)]));
+  // Layout: tabs, a gap, the header, a gap, the view, the keys.
+  const header = gfx ? HEADER_ROWS : 3;
+  const height = Math.max(1, rows - header - 4);
+  const pw = previewWidth(columns);
+  const grid = gfx && view === 'hosts' ? hostGrid(gfx, columns, height) : null;
+
+  let items = [];
+  let focusable = [];
+  let tracks = [];
+  if (s && view === 'queue') {
+    items = queueItems({ gfx, s, cards, focus, dense });
+    focusable = items;
+  } else if (s && view === 'tracks') {
+    const t = trackItems({ gfx, s, focus });
+    items = t.items;
+    tracks = t.focusable;
+    focusable = tracks;
+  } else if (s && view === 'hosts') {
+    if (grid) focusable = hostsView(s, buildProfile(s)).shows;
+    else {
+      items = hostLines(s, focus);
+      focusable = items.filter((l) => l.focusable);
+    }
+  }
+  const n = focusable.length;
+  const at =
+    view === 'tracks'
+      ? (tracks[Math.min(focus, n - 1)]?.index ?? 0)
+      : view === 'hosts' && !grid
+        ? Math.max(0, items.indexOf(focusable[Math.min(focus, n - 1)]))
+        : Math.min(focus, Math.max(0, n - 1));
 
   // Keep focus on the list as it shrinks (a card played, removed or skipped).
   useEffect(() => {
-    if (focus > 0 && focus >= focusable.length) setFocus(Math.max(0, focusable.length - 1));
-  }, [focus, focusable.length]);
+    if (focus > 0 && focus >= n) setFocus(Math.max(0, n - 1));
+  }, [focus, n]);
 
   // Sends a command and reports how it went, as the panel does.
   async function run(msg) {
@@ -285,17 +224,19 @@ function App({ initial }) {
       return;
     }
     if (!s) return;
-    const n = focusable.length;
     const card = view === 'queue' && cards[focus];
     const move = (i) => setFocus(Math.max(0, Math.min(n - 1, i)));
+    const row = grid ? grid.per : 1;
     if (key.meta && (key.upArrow || key.downArrow))
       return view === 'queue' && reorder(focus + (key.upArrow ? -1 : 1));
-    if (input === 'j' || key.downArrow) return move(focus + 1);
-    if (input === 'k' || key.upArrow) return move(focus - 1);
+    if (input === 'j' || key.downArrow) return move(focus + row);
+    if (input === 'k' || key.upArrow) return move(focus - row);
+    if (grid && (input === 'l' || key.rightArrow)) return move(focus + 1);
+    if (grid && (input === 'h' || key.leftArrow)) return move(focus - 1);
     if (key.pageDown) return move(focus + 10);
     if (key.pageUp) return move(focus - 10);
     if (key.return && view === 'tracks') {
-      const t = focusable[focus]?.track;
+      const t = tracks[focus]?.track;
       if (!t) return;
       setSeek({ alias: t.alias, pos: t.offset, at: Date.now() });
       return run({ type: 'jump', alias: t.alias, path: t.path, offset: t.offset });
@@ -306,28 +247,45 @@ function App({ initial }) {
     if (input === ' ') return run({ type: 'toggle', play: !isPlaying(s.now) });
     if (input === 'N') return nextTrack();
     if (input === 'n') return run({ type: 'skip' });
-    const i = ['1', '2', '3'].indexOf(input);
-    if (i >= 0) {
-      setView(VIEWS[i]);
+    if (input === 'd' && gfx) return setDense((d) => !d);
+    if (VIEWS[input]) {
+      setView(VIEWS[input]);
       setFocus(0);
     }
   });
 
-  const height = Math.max(1, rows - 7);
   const empty = {
     queue: 'Nothing queued. New episodes show up here as NTS adds them.',
     tracks: 'Tracks show up here as they play. Enter jumps back to one.',
     hosts: '',
   }[view];
+  let body;
+  if (!s) body = ui`<${Box} height=${height} />`;
+  else if (grid)
+    body = ui`<${HostGrid} gfx=${gfx} s=${s} focus=${focus} columns=${columns} height=${height} />`;
+  else {
+    const side =
+      pw > 0 &&
+      view === 'queue' &&
+      ui`<${QueuePreview} gfx=${gfx} s=${s} card=${cards[at]} width=${pw - 2} height=${height} />`;
+    const sideT =
+      pw > 0 &&
+      view === 'tracks' &&
+      ui`<${TrackPreview} gfx=${gfx} s=${s} track=${tracks[focus]?.track} width=${pw - 2} height=${height} />`;
+    body = ui`<${Box} height=${height}>
+      <${List} key=${view + dense} items=${items} at=${at} height=${height} empty=${empty} />
+      ${side || sideT}
+    <//>`;
+  }
   return ui`<${Box} flexDirection="column" width=${columns} height=${rows}>
     <${Tabs} view=${view} count=${s ? queuedCount(s) : 0} />
     <${Text}> <//>
-    <${Now} v=${v} width=${columns} />
+    <${Now} gfx=${gfx} s=${s} v=${v} width=${columns} />
     <${Text}> <//>
-    <${List} lines=${lines.map((l) => l.el)} at=${at} height=${height} empty=${empty} />
+    ${body}
     <${Box} paddingX=${1}>
       <${Text} wrap="truncate-end" color=${online ? undefined : 'yellow'} dimColor=${online && !toast}>
-        ${online ? toast || KEYS : 'Chrome is closed. Waiting for it to start. Space starts it, q quits.'}
+        ${online ? toast || (gfx ? ART_KEYS : KEYS) : 'Chrome is closed. Waiting for it to start. Space starts it, q quits.'}
       <//>
     <//>
   <//>`;
@@ -335,12 +293,22 @@ function App({ initial }) {
 
 export async function runTui() {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('nts tui needs a terminal');
+  const cells = await detect();
   const client = await connect();
   await client.subscribe();
-  const app = render(ui`<${App} initial=${client} />`, {
+  let gfx = null;
+  if (cells) {
+    gfx = new Gfx({ ...cells, write: null });
+    gfx.write = gfx.hook(process.stdout);
+  }
+  const app = render(ui`<${GfxProvider} gfx=${gfx}><${App} initial=${client} /><//>`, {
     alternateScreen: true,
     kittyKeyboard: { mode: 'auto' },
     exitOnCtrlC: false,
   });
-  await app.waitUntilExit();
+  try {
+    await app.waitUntilExit();
+  } finally {
+    gfx?.dispose();
+  }
 }
