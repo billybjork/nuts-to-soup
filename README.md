@@ -89,6 +89,8 @@ If Chrome isn't running, `nts` starts it in the background (`open -g`) and waits
 
 `nts tui` (or `nts player`) shows the queue (stacked by show), what's playing with its progress and current track, and the Tracks and Hosts views. It updates as the extension's state changes. Keys are the panel's: `J`/`K`, `Enter` play, `Shift`+`Enter` play next (or `T`, for terminals that can't tell it from `Enter`), `Alt`+`↑`/`↓` reorder, `X` remove, `Space` play/pause, `N` skip, `Shift`+`N` next track, `1` `2` `3` views, `Q` quit. If Chrome quits, it waits and reconnects when Chrome is back.
 
+In terminals with the kitty graphics protocol (Rex, kitty, Ghostty) it also shows pictures: a small turntable in the header that turns while the episode plays, with the tonearm following progress over a blurred backdrop of the cover; a timeline with a block per track; cover thumbnails in the queue and Tracks lists, with a preview column when the terminal is wide; Hosts as a grid of covers; and an accent color taken from the cover. `D` switches the lists between thumbnail rows and denser one-line rows. The TUI asks the terminal whether it supports graphics when it starts, and leaves them off inside tmux and screen. `NTS_GRAPHICS=0 nts tui` turns them off. Covers are cached in `~/Library/Caches/nuts-to-soup/art`.
+
 ### Rex
 
 [`tui/rex/init.lua`](tui/rex/init.lua) is an example [Rex](https://www.superlogical.com/rex) config. Copy it into `~/.config/rex/init.lua` (or `require` it from there) and run `rex config reload`. It adds five Rex actions. These run inside Rex, not in a shell: pick them from the command palette (type "NTS"), or run `rex do nts_toggle` and so on. Each runs the `nts` command in the last column, which you can also type in any terminal.
